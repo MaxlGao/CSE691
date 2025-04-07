@@ -223,6 +223,8 @@ def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20):
     if not isinstance(other_corners, (list, tuple)):
         other_corners = [other_corners]
 
+    # Restricted motions in (+x, -x, +y, -y, +z, -z)
+    restricted = [False, False, False, False, False, False]
         
     if valid_mates is not None:
         mates_list = valid_mates[this_pid] # Mates pertaining to this piece
@@ -235,6 +237,15 @@ def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20):
             for ((pid1, cid1), (pid2, cid2)) in mates_list
             if pid2 in available_pieces
         ]
+        # Rule: You cannot move in (.., .., +x) if you cannot move in (0, 0, +x), etc
+        dd = 0.25
+        test_vecs = np.array([[dd, 0, 0], [-dd, 0, 0],
+                              [0, dd, 0], [0, -dd, 0],
+                              [0, 0, dd], [0, 0, -dd]])
+        for i, test_vec in enumerate(test_vecs):
+            test_piece = this_piece['mesh'].copy()
+            if not check_path_clear(test_piece, other_meshes, test_vec, 1):
+                restricted[i] = True
     else:
         combinations = []
         for cid1, pos1 in this_corners:
@@ -244,11 +255,19 @@ def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20):
                     ((this_pid, cid1), (pid2, cid2), vec)
                 )
 
-    
+
     unique_motions = {}
     feasible_motions = []
 
     for (p1, c1), (p2, c2), vec in combinations:
+        tol = 0.001 # Ignore small movements
+        if any([vec[0] > tol and restricted[0],
+                vec[0] < -tol and restricted[1],
+                vec[1] > tol and restricted[2],
+                vec[1] < -tol and restricted[3],
+                vec[2] > tol and restricted[4],
+                vec[2] < -tol and restricted[5]]):
+            continue # Vec uses a restricted path; count as colliding
         key = tuple(np.round(vec, 4))  # avoid float fuzz
         if key in unique_motions:
             continue # Already seen this transformation
@@ -275,13 +294,18 @@ def get_valid_mates(pieces, floor):
     for p1 in pieces:
         start_time = time.time()
         pid = p1['id']
-        valid_motions = get_feasible_motions(p1, all_pieces, steps=1)
-        # cache = cache + valid_motions
+        valid_motions = []
+        for p2 in all_pieces:
+            that_pid = p2['id']
+            if pid == that_pid:
+                continue
+            valid_motions_p2 = get_feasible_motions(p1, p2, steps=1)
+            valid_motions = valid_motions + valid_motions_p2
         valid_mates = [motion[:2] for motion in valid_motions]
         cache[pid] = valid_mates
         end_time = time.time()
         cache_length += len(valid_mates)
-        print(f"| Got {len(valid_mates)} mates for piece {pid}. This took {(end_time-start_time):4f} seconds.")
+        print(f"| Got {len(valid_mates)} mates for piece {pid}. This took {(end_time-start_time):.4f} seconds.")
     print(f"For this assembly, there are {cache_length} valid piece-to-piece mates")
     return cache
 
@@ -332,7 +356,7 @@ def move_piece(piece, translation):
     piece['corners'] = [(cid, pos+translation) for cid,pos in piece['corners']]
     return piece
 
-def get_moves_scored(pieces, assembly, mates_list, target_offsets):
+def get_moves_scored(pieces, assembly, mates_list, target_offsets, talk=True):
     start_time = time.time()
     feasible = []
     feasible_counts = []
@@ -342,7 +366,8 @@ def get_moves_scored(pieces, assembly, mates_list, target_offsets):
         feasible_counts.append(len(new_feasible))
     end_time = time.time()
     elapsed_time = end_time - start_time
-    print(f"| Pieces 0-5 have {feasible_counts} available moves. This took {elapsed_time:.4f} seconds.")
+    if talk:
+        print(f"| Pieces 0-5 have {feasible_counts} available moves. This took {elapsed_time:.4f} seconds.")
 
     feasible.append(((0,0),(0,0),([0,0,0]))) # zero-action move
 
@@ -353,7 +378,7 @@ def get_moves_scored(pieces, assembly, mates_list, target_offsets):
     scored_moves.sort(key=lambda x: x[0])
     return scored_moves
 
-def get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, top_k = 2):
+def get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, top_k=2, rollout_depth=4):
     # start_time = time.time()
     print("| Getting primary moves...")
     all_scored_moves = get_moves_scored(pieces, assembly, mates_list, target_offsets)
@@ -370,32 +395,55 @@ def get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, top
         temp_pieces[pid1] = temp_piece
         if not temp_piece['id'] in assembly_list:
             temp_assembly = assembly + [temp_piece]
-            temp_assembly_list = [piece['id'] for piece in temp_assembly]
+            # temp_assembly_list = [piece['id'] for piece in temp_assembly]
         else:
             temp_assembly = assembly
-            temp_assembly_list = assembly_list
+            # temp_assembly_list = assembly_list
         # print(f"| | Virtual Assembly consists of {temp_assembly_list}")
 
         # Find best *secondary* move from new state
+        print(f"| | Rolling out from primary move {movei + 1}/{top_k}...")
         start_time = time.time()
-        secondary_best = float("inf")
-        secondary_counts = []
-        for j in range(6):
-            secondary_moves = get_feasible_motions(temp_pieces[j], temp_assembly, mates_list)
-            secondary_counts.append(len(secondary_moves))
-            for smove in secondary_moves:
-                (_, _), (_, _), svec = smove
-                cost = get_cost_change(temp_pieces[j], svec, target_offsets[j])
-                if cost < secondary_best:
-                    secondary_best = cost
-        total_score = primary_cost + secondary_best
+
+        future_cost = greedy_rollout_score(
+            temp_pieces,
+            temp_assembly,
+            mates_list,
+            target_offsets,
+            depth=rollout_depth
+        )
+        total_score = primary_cost + future_cost
+        elapsed_time = time.time() - start_time
+        print(f"| | → Rollout total score: {total_score:.4f}. This all took {elapsed_time:.4f} seconds.")
         scored_moves.append((total_score, ((pid1,cid1),(pid2,cid2), vec)))
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        print(f"| | In Primary Move {movei+1} / {top_k}, Pieces 0-5 have {secondary_counts} available moves. This took {elapsed_time:.4f} seconds.")
 
     scored_moves.sort(key=lambda x: x[0])
     return scored_moves
+
+def greedy_rollout_score(pieces, assembly, mates_list, target_offsets, depth=2):
+    if depth == 0:
+        return 0
+
+    start_time = time.time()
+    best_cost = float("inf")
+    best_move = None
+    best_piece = None
+
+    scored_moves = get_moves_scored(pieces, assembly, mates_list, target_offsets, talk=False)
+    best_move = scored_moves[0]
+    elapsed_time = time.time() - start_time
+    best_cost, ((best_pid, _), (other_pid, _), best_vec) = best_move
+    print(f"| | | Rollout move: Piece {best_pid} moves by {best_vec}. Depth to go: {depth-1}. This took {elapsed_time:.4f} seconds.")
+    if best_move is None:
+        return 0  # No valid move
+
+    # Execute best move
+    temp_piece = move_piece(copy.deepcopy(pieces[best_pid]), best_vec)
+    temp_pieces = copy.deepcopy(pieces)
+    temp_pieces[best_pid] = temp_piece
+    new_assembly = assembly + [temp_piece]
+
+    return best_cost + greedy_rollout_score(temp_pieces, new_assembly, mates_list, target_offsets, depth=depth-1)
 
 def show_moves_scored(scene, scored_moves, pieces, floor):
     # Remove old arrows
@@ -455,18 +503,20 @@ def test_script():
     n_stages = 8
     for stage in range(n_stages):
         scored_moves = get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets)
-        print(f"Best score change:{scored_moves[0][0]:4f}")
+        best_move = scored_moves[0]
+        best_cost, ((best_pid, _), (other_pid, _), best_vec) = best_move
+        print(f"Best move: Piece {best_pid} → {other_pid}, vec = {best_vec}.")
         show_moves_scored(scene, scored_moves, pieces, floor)
         # Now execute, and add the moved piece to the assembly
-        moved_piece = pieces[scored_moves[0][1][0][0]]
-        translation = scored_moves[0][1][2]
+        moved_piece = pieces[best_pid]
+        translation = best_vec
         moved_piece = move_piece(moved_piece, translation)
         # Add part to assembly, if not there already
         if not moved_piece['id'] in assembly_list:
             assembly.append(moved_piece)
             assembly_list.append(moved_piece['id'])
         show_corners(scene, moved_piece)
-        print(f"Done with Stage {stage+1} / {n_stages}")
+        print(f"Done with Stage {stage+1} / {n_stages}. New Cost: {cost_function(pieces, target_offsets):.4f}")
         # print(f"Assembly consists of {assembly_list}")
     scene.show()
 
