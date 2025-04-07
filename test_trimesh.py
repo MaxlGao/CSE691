@@ -267,13 +267,13 @@ def get_valid_mates(pieces, floor):
     Returns a dict of lists of mates (p1,c1),(p2,c2)
     """
     print("Precomputing mates...")
-    start_time = time.time()
     # Augment piece list with floor
     all_pieces = copy.deepcopy(pieces)
     all_pieces.append(copy.deepcopy(floor))
     cache = {}
     cache_length = 0
     for p1 in pieces:
+        start_time = time.time()
         pid = p1['id']
         valid_motions = get_feasible_motions(p1, all_pieces, steps=1)
         # cache = cache + valid_motions
@@ -281,7 +281,7 @@ def get_valid_mates(pieces, floor):
         cache[pid] = valid_mates
         end_time = time.time()
         cache_length += len(valid_mates)
-        print(f"Got {len(valid_mates)} mates for piece {pid}. t = {(end_time-start_time):4f}s")
+        print(f"| Got {len(valid_mates)} mates for piece {pid}. This took {(end_time-start_time):4f} seconds.")
     print(f"For this assembly, there are {cache_length} valid piece-to-piece mates")
     return cache
 
@@ -340,10 +340,9 @@ def get_moves_scored(pieces, assembly, mates_list, target_offsets):
         new_feasible = get_feasible_motions(pieces[i], assembly, mates_list)
         feasible = feasible + new_feasible
         feasible_counts.append(len(new_feasible))
-    print(f"| Pieces 0-5 have {feasible_counts} available moves")
     end_time = time.time()
     elapsed_time = end_time - start_time
-    print(f"| Time taken to get feasible moves: {elapsed_time:.4f} seconds")
+    print(f"| Pieces 0-5 have {feasible_counts} available moves. This took {elapsed_time:.4f} seconds.")
 
     feasible.append(((0,0),(0,0),([0,0,0]))) # zero-action move
 
@@ -355,7 +354,7 @@ def get_moves_scored(pieces, assembly, mates_list, target_offsets):
     return scored_moves
 
 def get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, top_k = 2):
-    start_time = time.time()
+    # start_time = time.time()
     print("| Getting primary moves...")
     all_scored_moves = get_moves_scored(pieces, assembly, mates_list, target_offsets)
     top_moves = all_scored_moves[:top_k]
@@ -378,6 +377,7 @@ def get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, top
         # print(f"| | Virtual Assembly consists of {temp_assembly_list}")
 
         # Find best *secondary* move from new state
+        start_time = time.time()
         secondary_best = float("inf")
         secondary_counts = []
         for j in range(6):
@@ -388,13 +388,11 @@ def get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, top
                 cost = get_cost_change(temp_pieces[j], svec, target_offsets[j])
                 if cost < secondary_best:
                     secondary_best = cost
-        print(f"| | Pieces 0-5 have {secondary_counts} available moves.")
-
         total_score = primary_cost + secondary_best
         scored_moves.append((total_score, ((pid1,cid1),(pid2,cid2), vec)))
         end_time = time.time()
         elapsed_time = end_time - start_time
-        print(f"| | Done with Move {movei+1} / {top_k}. Time: {elapsed_time:.4f}")
+        print(f"| | In Primary Move {movei+1} / {top_k}, Pieces 0-5 have {secondary_counts} available moves. This took {elapsed_time:.4f} seconds.")
 
     scored_moves.sort(key=lambda x: x[0])
     return scored_moves
@@ -457,7 +455,7 @@ def test_script():
     n_stages = 8
     for stage in range(n_stages):
         scored_moves = get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets)
-        print("Best score change:", scored_moves[0][0])
+        print(f"Best score change:{scored_moves[0][0]:4f}")
         show_moves_scored(scene, scored_moves, pieces, floor)
         # Now execute, and add the moved piece to the assembly
         moved_piece = pieces[scored_moves[0][1][0][0]]
