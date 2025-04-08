@@ -2,8 +2,12 @@ import trimesh
 import numpy as np
 import time
 import copy
+import imageio
+import os
 
+np.set_printoptions(formatter={'int': '{:2d}'.format})
 REFERENCE_INDEX_OFFSET = 50 # Bump up reference piece indices
+FLOOR_INDEX_OFFSET = 100 # Bump up floor piece index
 
 def find_cube_corners(mesh, tol=1e-6):
     """
@@ -61,7 +65,7 @@ def create_floor():
     corners = [(0,[-1,0,0]), (1,[1,0,0]),
                (2,[-1,2,0]), (3,[1,2,0]),
                (4,[-1,-2,0]), (5,[1,-2,0])] 
-    return {'mesh': floor, 'corners': corners, 'id': 100}
+    return {'mesh': floor, 'corners': corners, 'id': FLOOR_INDEX_OFFSET}
 
 def create_burr_piece(blocks, color, idx, reference=False):
     """
@@ -305,7 +309,7 @@ def get_valid_mates(pieces, floor):
         cache[pid] = valid_mates
         cache_length += len(valid_mates)
         print(f"| Got {len(valid_mates):4d} mates for piece {pid}. This took {(time.time()-start_time):.2f} seconds.")
-    print(f"For this assembly, there are {cache_length} valid piece-to-piece mates")
+    print(f"→ For this assembly, there are {cache_length} valid piece-to-piece mates")
     return cache
 
 
@@ -317,7 +321,7 @@ def create_arrow(move, pieces, floor, color=[0, 0, 0, 255]):
     """
     (pid1, cid1), (pid2, cid2), vec = move
     start = pieces[pid1]['corners'][cid1][1]
-    if pid2 == 100:
+    if pid2 == FLOOR_INDEX_OFFSET:
         end = floor['corners'][cid2][1]
     else:
         end = pieces[pid2]['corners'][cid2][1]
@@ -326,15 +330,6 @@ def create_arrow(move, pieces, floor, color=[0, 0, 0, 255]):
     ]))
     path.colors = np.array([color])
     return path
-
-def show_corners(scene, piece):
-    for cid, pos in piece['corners']:
-        pid = piece['id']
-        sphere = trimesh.creation.uv_sphere(radius=0.1)
-        sphere.apply_translation(pos)
-        sphere.visual.face_colors = [255, 255, 255, 255]
-        scene.add_geometry(sphere, node_name=f'corner_{pid}_{cid}')
-
 
 def cost_function(pieces, target_offsets):
     offsets = [piece['mesh'].bounding_box.centroid for piece in pieces]
@@ -355,7 +350,7 @@ def move_piece(piece, translation):
     piece['corners'] = [(cid, pos+translation) for cid,pos in piece['corners']]
     return piece
 
-def get_moves_scored(pieces, assembly, mates_list, target_offsets, talk=True):
+def get_moves_scored(pieces, assembly, target_offsets, mates_list=None, talk=True):
     start_time = time.time()
     feasible = []
     feasible_counts = []
@@ -375,10 +370,10 @@ def get_moves_scored(pieces, assembly, mates_list, target_offsets, talk=True):
     scored_moves.sort(key=lambda x: x[0])
     return scored_moves
 
-def get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, top_k=8, rollout_depth=8):
-    # start_time = time.time()
-    print("| Getting primary moves...")
-    all_scored_moves = get_moves_scored(pieces, assembly, mates_list, target_offsets)
+def get_moves_scored_lookahead(pieces, assembly, target_offsets, mates_list=None, top_k=2, lookahead = 2, rollout_depth=2):
+    print("Getting primary moves...")
+    all_scored_moves = get_moves_scored(pieces, assembly, target_offsets, mates_list)
+    top_k = min(len(all_scored_moves), top_k)
     top_moves = all_scored_moves[:top_k]
     print(f"| Looking Ahead from top {top_k} moves...")
     
@@ -392,23 +387,14 @@ def get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, top
         temp_pieces[pid1] = temp_piece
         if not temp_piece['id'] in assembly_list:
             temp_assembly = assembly + [temp_piece]
-            # temp_assembly_list = [piece['id'] for piece in temp_assembly]
         else:
             temp_assembly = assembly
-            # temp_assembly_list = assembly_list
-        # print(f"| | Virtual Assembly consists of {temp_assembly_list}")
 
         # Find best *secondary* move from new state
         print(f"| | Rolling out from primary move {movei + 1}/{top_k}...")
         start_time = time.time()
 
-        future_cost = greedy_rollout_score(
-            temp_pieces,
-            temp_assembly,
-            mates_list,
-            target_offsets,
-            depth=rollout_depth
-        )
+        future_cost = greedy_rollout_score(temp_pieces, temp_assembly, target_offsets, mates_list, depth=rollout_depth)
         total_score = primary_cost + future_cost
         print(f"| | → Rollout total score: {total_score:.4f}. This all took {time.time() - start_time:.2f} seconds.")
         scored_moves.append((total_score, ((pid1,cid1),(pid2,cid2), vec)))
@@ -416,7 +402,7 @@ def get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, top
     scored_moves.sort(key=lambda x: x[0])
     return scored_moves
 
-def greedy_rollout_score(pieces, assembly, mates_list, target_offsets, depth=2):
+def greedy_rollout_score(pieces, assembly, target_offsets, mates_list, depth=2):
     if depth == 0:
         return 0
 
@@ -424,12 +410,13 @@ def greedy_rollout_score(pieces, assembly, mates_list, target_offsets, depth=2):
     best_cost = float("inf")
     best_move = None
 
-    scored_moves = get_moves_scored(pieces, assembly, mates_list, target_offsets, talk=False)
+    scored_moves = get_moves_scored(pieces, assembly, target_offsets, mates_list, talk=False)
     best_move = scored_moves[0]
     best_cost, ((best_pid, _), (_, _), best_vec) = best_move
-    print(f"| | | Rollout: Of {len(scored_moves):3d} moves, best is Piece {best_pid} moving by {best_vec}. Depth to go: {depth-1}. This took {time.time() - start_time:.2f} seconds.")
-    if best_move is None:
-        return 0  # No valid move
+    x, y, z = best_vec
+    print(f"| | | Greedy: Of {len(scored_moves):3d} moves, best is p{best_pid} moving by <{x: .0f},{y: .0f},{z: .0f}>. Depth to go: {depth-1}. This took {time.time() - start_time:.2f}s.")
+    if best_move is None or best_cost == 0:
+        return 0  # No valid move or best greedy move is zero.
 
     # Execute best move
     temp_piece = move_piece(copy.deepcopy(pieces[best_pid]), best_vec)
@@ -437,15 +424,32 @@ def greedy_rollout_score(pieces, assembly, mates_list, target_offsets, depth=2):
     temp_pieces[best_pid] = temp_piece
     new_assembly = assembly + [temp_piece]
 
-    return best_cost + greedy_rollout_score(temp_pieces, new_assembly, mates_list, target_offsets, depth=depth-1)
+    return best_cost + greedy_rollout_score(temp_pieces, new_assembly, target_offsets, mates_list, depth=depth-1)
 
-def show_moves_scored(scene, scored_moves, pieces, floor):
-    # Remove old arrows
-    arrow_nodes = [name for name in scene.graph.nodes_geometry if name.startswith('arrow_')]
-    for name in arrow_nodes:
-        scene.delete_geometry(name)
 
+
+def render_scene(all_pieces, arrows=None, remake_pieces=True, camera = [14.0, -16.0, 20.0, 0.0]):
+    scene = trimesh.Scene()
+    if remake_pieces:
+        for piece in all_pieces:
+            pid = piece['id']
+            scene.add_geometry(piece['mesh'], node_name=f"piece_{pid}")
+            if pid == FLOOR_INDEX_OFFSET or pid < REFERENCE_INDEX_OFFSET:
+                show_corners(scene, piece)
+    if arrows:
+        # Remove old arrows
+        arrow_nodes = [name for name in scene.graph.nodes_geometry if name.startswith('arrow_')]
+        for name in arrow_nodes:
+            scene.delete_geometry(name)
+
+        for i, arrow in enumerate(arrows):
+            scene.add_geometry(arrow, node_name=f"arrow_{i}")
+    scene.camera_transform = get_transform_matrix(camera)
+    return scene
+
+def show_moves_scored(scored_moves, pieces, floor):
     # Show moves, make the first one green, and make the next 19 black
+    arrows = []
     for i, (score, move) in enumerate(scored_moves):
         if i == 0:
             color = [0, 255, 0, 255]
@@ -453,66 +457,98 @@ def show_moves_scored(scene, scored_moves, pieces, floor):
             color = [0, 0, 0, 255]
         else:
             color = [0, 0, 0, 50]
-        arrow = create_arrow(move, pieces, floor, color=color)
-        scene.add_geometry(arrow, node_name=f'arrow_{i}')
+        arrows.append(create_arrow(move, pieces, floor, color=color))
+    return arrows
 
-def test_script():
-    scene = trimesh.Scene()
+def show_corners(scene, piece):
+    for cid, pos in piece['corners']:
+        pid = piece['id']
+        sphere = trimesh.creation.uv_sphere(radius=0.1)
+        sphere.apply_translation(pos)
+        sphere.visual.face_colors = [255, 255, 255, 255]
+        scene.add_geometry(sphere, node_name=f'corner_{pid}_{cid}')
+
+def get_transform_matrix(position):
+    x, y, z, roll = position
+    # Set Camera as x, y, z, roll staring at origin
+    forward = np.array([x,y,z])
+    forward /= np.linalg.norm(forward)
+    right = np.cross(np.array([0, 0, 1]), forward)
+    right /= np.linalg.norm(right)
+    up = np.cross(forward, right)
+    roll_right = right * np.cos(roll) + up * np.sin(roll)
+    roll_up = -right * np.sin(roll) + up * np.cos(roll)
+    transform = np.eye(4)
+    transform[:3, 0] = roll_right    # Right vector
+    transform[:3, 1] = roll_up       # Up vector
+    transform[:3, 2] = forward       # Forward vector
+    transform[:3, 3] = [x, y, z]     # Position
+    return transform
+
+def save_animation_frame(scene, index, out_dir="frames"):
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Save as image
+    image_path = os.path.join(out_dir, f"frame_{index:03d}.png")
+    png = scene.save_image(resolution=(800, 600), visible=True)
+    with open(image_path, 'wb') as f:
+        f.write(png)
+
+    print(f"Saved frame {index} to {image_path}")
+
+def test_script(n_stages=12,top_k=8,lookahead=2,rollout_depth=8):
     # Create Reference Pieces
     reference_pieces = define_all_burr_pieces(reference=True)
     target_offsets = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
     target_offsets += [0,0,3]
-    
     for piece in reference_pieces:
-        _ = piece['mesh'].nearest
-        pid = piece['id']
-        piece = move_piece(piece, target_offsets[pid-REFERENCE_INDEX_OFFSET])
-        scene.add_geometry(piece['mesh'], node_name=f'piece_reference_{pid}')
+        piece = move_piece(piece, target_offsets[piece['id']-REFERENCE_INDEX_OFFSET])
     
     # Create Floor
     floor = create_floor()
-    scene.add_geometry(floor['mesh'], node_name='floor')
-    show_corners(scene, floor)
-    
     
     # Create Real Pieces
     pieces = define_all_burr_pieces()
     start_offsets = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
-
     for piece in pieces:
-        pid = piece['id']
-        piece = move_piece(piece, start_offsets[pid])
-        scene.add_geometry(piece['mesh'], node_name=f'piece_real_{pid}')
-        show_corners(scene, piece)
+        piece = move_piece(piece, start_offsets[piece['id']])
+    
     cost = cost_function(pieces, target_offsets)
     print(f"Initial Cost Measure: {cost:.4f}")
 
+    # Create initial scene
+    all_pieces = reference_pieces + pieces + [floor]
+    scene = render_scene(all_pieces)
+    save_animation_frame(scene, 0)
+
     # Precompute Mates (p1,c1), (p2,c2)
     mates_list = get_valid_mates(pieces, floor)
+    # mates_list = None
 
     # Begin assembly set with the floor. The floor is a static base piece. 
     assembly = [floor]
-    assembly_list = [100]
-    n_stages = 8
+    assembly_list = [FLOOR_INDEX_OFFSET]
     for stage in range(n_stages):
-        scored_moves = get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets)
+        scored_moves = get_moves_scored_lookahead(pieces, assembly, target_offsets, mates_list, top_k=top_k, lookahead=lookahead, rollout_depth=rollout_depth)
         best_move = scored_moves[0]
-        best_cost, ((best_pid, _), (other_pid, _), best_vec) = best_move
-        print(f"Best move: Piece {best_pid} → {other_pid}, vec = {best_vec}.")
-        show_moves_scored(scene, scored_moves, pieces, floor)
+        _, ((best_pid, _), (other_pid, _), best_vec) = best_move
+        x, y, z = best_vec
+        print(f"| → Best move: Piece {best_pid} → {other_pid}, vec = <{x: .0f},{y: .0f},{z: .0f}>.")
         # Now execute, and add the moved piece to the assembly
         moved_piece = pieces[best_pid]
-        translation = best_vec
-        moved_piece = move_piece(moved_piece, translation)
+        moved_piece = move_piece(moved_piece, best_vec)
         # Add part to assembly, if not there already
-        if not moved_piece['id'] in assembly_list:
+        if not best_pid in assembly_list:
             assembly.append(moved_piece)
-            assembly_list.append(moved_piece['id'])
-        show_corners(scene, moved_piece)
-        print(f"Done with Stage {stage+1} / {n_stages}. New Cost: {cost_function(pieces, target_offsets):.4f}")
-        # print(f"Assembly consists of {assembly_list}")
+            assembly_list.append(best_pid)
+        print(f"→ Done with Stage {stage+1} / {n_stages}. New Cost: {cost_function(pieces, target_offsets):.4f}")
+
+        arrows = show_moves_scored(scored_moves, pieces, floor)
+        all_pieces = reference_pieces + pieces + [floor]
+        scene = render_scene(all_pieces, arrows)
+        save_animation_frame(scene, stage+1)
     scene.show()
-
+start_time = time.time()
 test_script()
-
+print(f"This script took {time.time() - start_time:4.0f} seconds")
 
