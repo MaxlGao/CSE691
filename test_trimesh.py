@@ -77,11 +77,12 @@ def create_burr_piece(blocks, color, idx, reference=False):
         position = block['position']
         box = trimesh.creation.box(extents=size)
         box.apply_translation(position)
-        box.visual.face_colors = color
+        # box.visual.face_colors = color
         meshes.append(box)
 
-    composite = trimesh.util.concatenate(meshes)
+    composite = trimesh.boolean.union(meshes)
     composite.process(validate=True)
+    composite.visual.face_colors = color
     corners = find_cube_corners(composite)
     if reference:
         idx += REFERENCE_INDEX_OFFSET
@@ -162,22 +163,17 @@ def check_path_clear(this_piece, other_pieces, translation, steps, tol=0.01):
     # Convert single piece to list for uniform handling
     if not isinstance(other_pieces, (list, tuple)):
         other_pieces = [other_pieces]
-
     
-    sample_points = this_piece.vertices - 0.05 * this_piece.vertex_normals
-    center_points = []
-    for center, normal in zip(this_piece.triangles_center, this_piece.face_normals):
-        point = center - normal * 0.05
-        center_points.append(point)
-    sample_points = np.vstack((sample_points, np.array(center_points)))
-
-
+    # Create vertex sample points for fast collision detection
+    # sample_points = this_piece.vertices - 0.05 * this_piece.vertex_normals
 
     this_bbox = this_piece.bounds
     for step in reversed(range(1, steps + 1)):
         frac_translation = (translation * step) / (steps)
         test_bbox = this_bbox + frac_translation
-        test_points = sample_points + frac_translation
+        # test_points = sample_points + frac_translation
+        test_piece = this_piece.copy()
+        test_piece.apply_translation(frac_translation)
 
         for other_piece in other_pieces:
             other_bbox = other_piece.bounds
@@ -185,7 +181,11 @@ def check_path_clear(this_piece, other_pieces, translation, steps, tol=0.01):
                     all(test_bbox[1] > other_bbox[0])):   # Check for upper test > lower other
                 continue # If the boxes don't touch, don't bother
 
-            if any(other_piece.nearest.signed_distance(test_points) > tol):
+            # Check sample points and exit early if there's a violation
+            # if any(other_piece.nearest.signed_distance(test_points) > tol):
+                # return False
+            # Otherwise, do full volumetric collision detection.
+            if trimesh.boolean.intersection([test_piece, other_piece], check_volume=False).volume > tol:
                 return False
 
     return True  # No collision detected along the entire path
@@ -303,9 +303,8 @@ def get_valid_mates(pieces, floor):
             valid_motions = valid_motions + valid_motions_p2
         valid_mates = [motion[:2] for motion in valid_motions]
         cache[pid] = valid_mates
-        end_time = time.time()
         cache_length += len(valid_mates)
-        print(f"| Got {len(valid_mates)} mates for piece {pid}. This took {(end_time-start_time):.4f} seconds.")
+        print(f"| Got {len(valid_mates):4d} mates for piece {pid}. This took {(time.time()-start_time):.2f} seconds.")
     print(f"For this assembly, there are {cache_length} valid piece-to-piece mates")
     return cache
 
@@ -364,10 +363,8 @@ def get_moves_scored(pieces, assembly, mates_list, target_offsets, talk=True):
         new_feasible = get_feasible_motions(pieces[i], assembly, mates_list)
         feasible = feasible + new_feasible
         feasible_counts.append(len(new_feasible))
-    end_time = time.time()
-    elapsed_time = end_time - start_time
     if talk:
-        print(f"| Pieces 0-5 have {feasible_counts} available moves. This took {elapsed_time:.4f} seconds.")
+        print(f"| Pieces 0-5 have {feasible_counts} available moves. This took {time.time() - start_time:.2f} seconds.")
 
     feasible.append(((0,0),(0,0),([0,0,0]))) # zero-action move
 
@@ -378,7 +375,7 @@ def get_moves_scored(pieces, assembly, mates_list, target_offsets, talk=True):
     scored_moves.sort(key=lambda x: x[0])
     return scored_moves
 
-def get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, top_k=2, rollout_depth=4):
+def get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, top_k=8, rollout_depth=8):
     # start_time = time.time()
     print("| Getting primary moves...")
     all_scored_moves = get_moves_scored(pieces, assembly, mates_list, target_offsets)
@@ -413,8 +410,7 @@ def get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, top
             depth=rollout_depth
         )
         total_score = primary_cost + future_cost
-        elapsed_time = time.time() - start_time
-        print(f"| | → Rollout total score: {total_score:.4f}. This all took {elapsed_time:.4f} seconds.")
+        print(f"| | → Rollout total score: {total_score:.4f}. This all took {time.time() - start_time:.2f} seconds.")
         scored_moves.append((total_score, ((pid1,cid1),(pid2,cid2), vec)))
 
     scored_moves.sort(key=lambda x: x[0])
@@ -427,13 +423,11 @@ def greedy_rollout_score(pieces, assembly, mates_list, target_offsets, depth=2):
     start_time = time.time()
     best_cost = float("inf")
     best_move = None
-    best_piece = None
 
     scored_moves = get_moves_scored(pieces, assembly, mates_list, target_offsets, talk=False)
     best_move = scored_moves[0]
-    elapsed_time = time.time() - start_time
-    best_cost, ((best_pid, _), (other_pid, _), best_vec) = best_move
-    print(f"| | | Rollout move: Piece {best_pid} moves by {best_vec}. Depth to go: {depth-1}. This took {elapsed_time:.4f} seconds.")
+    best_cost, ((best_pid, _), (_, _), best_vec) = best_move
+    print(f"| | | Rollout: Of {len(scored_moves):3d} moves, best is Piece {best_pid} moving by {best_vec}. Depth to go: {depth-1}. This took {time.time() - start_time:.2f} seconds.")
     if best_move is None:
         return 0  # No valid move
 
@@ -490,7 +484,6 @@ def test_script():
         piece = move_piece(piece, start_offsets[pid])
         scene.add_geometry(piece['mesh'], node_name=f'piece_real_{pid}')
         show_corners(scene, piece)
-
     cost = cost_function(pieces, target_offsets)
     print(f"Initial Cost Measure: {cost:.4f}")
 
