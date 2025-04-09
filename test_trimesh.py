@@ -194,7 +194,7 @@ def check_path_clear(this_piece, other_pieces, translation, steps, tol=0.01):
 
     return True  # No collision detected along the entire path
 
-def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20):
+def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20, check_collision=True):
     """
     Compute feasible, unique linear motions from `this_piece` to any other in `pieces`.
 
@@ -279,7 +279,7 @@ def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20):
 
         # Check Path of Motion
         test_piece = this_piece['mesh'].copy()
-        if check_path_clear(test_piece, other_meshes, vec, steps):
+        if not check_collision or check_path_clear(test_piece, other_meshes, vec, steps):
             feasible_motions.append(((p1, c1), (p2, c2), vec))
 
     return feasible_motions
@@ -350,31 +350,45 @@ def move_piece(piece, translation):
     piece['corners'] = [(cid, pos+translation) for cid,pos in piece['corners']]
     return piece
 
-def get_moves_scored(pieces, assembly, target_offsets, mates_list=None, talk=True):
+def get_top_k_scored_moves(pieces, assembly, target_offsets, k=float("inf"), mates_list=None, talk=True):
     start_time = time.time()
-    feasible = []
-    feasible_counts = []
+
+    # First quickly make a broad list of semi-verified moves, not checking for intermediate collision
+    unverified = []
+    unverified_counts = []
     for i in range(6):
-        new_feasible = get_feasible_motions(pieces[i], assembly, mates_list)
-        feasible = feasible + new_feasible
-        feasible_counts.append(len(new_feasible))
-    if talk:
-        print(f"| Pieces 0-5 have {feasible_counts} available moves. This took {time.time() - start_time:.2f} seconds.")
+        new_unverified = get_feasible_motions(pieces[i], assembly, mates_list, steps=1, check_collision=False)
+        unverified = unverified + new_unverified
+        unverified_counts.append(len(new_unverified))
+    unverified.append(((0,0),(0,0),np.array([0,0,0]))) # zero-action move
 
-    feasible.append(((0,0),(0,0),([0,0,0]))) # zero-action move
-
-    scored_moves = []
-    for (pid1, cid1), (pid2, cid2), vec in feasible:
+    # Then sort by score. 
+    unverified_scored_moves = []
+    for (pid1, cid1), (pid2, cid2), vec in unverified:
         cost_change = get_cost_change(pieces[pid1], vec, target_offsets[pid1])
-        scored_moves.append((cost_change, ((pid1, cid1), (pid2, cid2), vec)))
-    scored_moves.sort(key=lambda x: x[0])
-    return scored_moves
+        unverified_scored_moves.append((cost_change, ((pid1, cid1), (pid2, cid2), vec)))
+    unverified_scored_moves.sort(key=lambda x: x[0])
+
+    # Then check feasibility until you get your quota. (or run out of feasible moves)
+    feasible_scored_moves = []
+    for scored_move in unverified_scored_moves:
+        _, ((pid1, _), (_, _), vec) = scored_move
+        this_piece = pieces[pid1]
+        test_piece = this_piece['mesh'].copy()
+        assembly_meshes = [piece["mesh"] for piece in assembly if piece["id"] != pid1]
+        if check_path_clear(test_piece, assembly_meshes, vec, 20):
+            feasible_scored_moves.append(scored_move)
+            if len(feasible_scored_moves) == k:
+                break
+    k = min(len(feasible_scored_moves), k)
+    if talk:
+        print(f"| Acquired Best {k} moves. This took {time.time() - start_time:.2f} seconds.")
+
+    return feasible_scored_moves
 
 def get_moves_scored_lookahead(pieces, assembly, target_offsets, mates_list=None, top_k=2, lookahead = 2, rollout_depth=2):
     print("Getting primary moves...")
-    all_scored_moves = get_moves_scored(pieces, assembly, target_offsets, mates_list)
-    top_k = min(len(all_scored_moves), top_k)
-    top_moves = all_scored_moves[:top_k]
+    top_moves = get_top_k_scored_moves(pieces, assembly, target_offsets, k=top_k, mates_list=mates_list)
     print(f"| Looking Ahead from top {top_k} moves...")
     
     assembly_list = [piece['id'] for piece in assembly]
@@ -410,11 +424,10 @@ def greedy_rollout_score(pieces, assembly, target_offsets, mates_list, depth=2):
     best_cost = float("inf")
     best_move = None
 
-    scored_moves = get_moves_scored(pieces, assembly, target_offsets, mates_list, talk=False)
-    best_move = scored_moves[0]
-    best_cost, ((best_pid, _), (_, _), best_vec) = best_move
+    best_move = get_top_k_scored_moves(pieces, assembly, target_offsets, k=1, mates_list=mates_list, talk=False)
+    best_cost, ((best_pid, _), (_, _), best_vec) = best_move[0]
     x, y, z = best_vec
-    print(f"| | | Greedy: Of {len(scored_moves):3d} moves, best is p{best_pid} moving by <{x: .0f},{y: .0f},{z: .0f}>. Depth to go: {depth-1}. This took {time.time() - start_time:.2f}s.")
+    print(f"| | | Greedy: Best move is p{best_pid} moving by <{x: .0f},{y: .0f},{z: .0f}>. Depth to go: {depth-1}. This took {time.time() - start_time:.2f}s.")
     if best_move is None or best_cost == 0:
         return 0  # No valid move or best greedy move is zero.
 
