@@ -4,10 +4,17 @@ import time
 import copy
 import imageio
 import os
+import colorsys
+import concurrent.futures
+
+# Nomenclature
+# Scored Move = (Score, Move) = (Score, (Mate, Translation)) = (Score, ((pid1, cid1), (pid2, cid2), Translation))
+# Pieces = [Piece, ..., Piece] = [{Mesh, Corners, ID}, ..., Piece]
 
 np.set_printoptions(formatter={'int': '{:2d}'.format})
 REFERENCE_INDEX_OFFSET = 50 # Bump up reference piece indices
 FLOOR_INDEX_OFFSET = 100 # Bump up floor piece index
+NULL_MOVE = ((0,0),(0,0),np.array([0,0,0])) # Definition of zero action
 
 def find_cube_corners(mesh, tol=1e-6):
     """
@@ -151,45 +158,38 @@ def define_all_burr_pieces(reference=False):
 
 
 
-def check_path_clear(this_piece, other_pieces, translation, steps, tol=0.01):
+def check_path_clear(this_mesh, other_meshes, translation, steps=20, tol=0.01):
     """
-    Check whether this_piece can be translated without colliding with other piece(s)
+    Check whether this_mesh can be translated without colliding with other meshes(s)
     at any step along the way. Handles both single-piece and multi-piece cases.
 
     Args:
-        this_piece: trimesh.Trimesh - The moving piece
-        other_pieces: Union[trimesh.Trimesh, List[trimesh.Trimesh]] - Either a single piece or list of pieces
+        this_mesh: trimesh.Trimesh - The moving piece
+        other_meshes: EITHER trimesh.Trimesh OR List[trimesh.Trimesh] - the other pieces
         translation: np.ndarray, shape (3,) - Translation vector
         steps: int - Number of interpolation steps to test
     Returns:
         bool - True if path is clear
     """
     # Convert single piece to list for uniform handling
-    if not isinstance(other_pieces, (list, tuple)):
-        other_pieces = [other_pieces]
+    if not isinstance(other_meshes, (list, tuple)):
+        other_meshes = [other_meshes]
     
-    # Create vertex sample points for fast collision detection
-    # sample_points = this_piece.vertices - 0.05 * this_piece.vertex_normals
-
-    this_bbox = this_piece.bounds
-    for step in reversed(range(1, steps + 1)):
+    this_bbox = this_mesh.bounds
+    for step in reversed(range(1, steps + 1)): # Start from end of trajectory, where collisions are most likely
         frac_translation = (translation * step) / (steps)
         test_bbox = this_bbox + frac_translation
-        # test_points = sample_points + frac_translation
-        test_piece = this_piece.copy()
-        test_piece.apply_translation(frac_translation)
+        test_mesh = this_mesh.copy()
+        test_mesh.apply_translation(frac_translation)
 
-        for other_piece in other_pieces:
-            other_bbox = other_piece.bounds
+        for other_mesh in other_meshes:
+            other_bbox = other_mesh.bounds
             if not (all(test_bbox[0] < other_bbox[1]) and # Check for lower test < upper other
                     all(test_bbox[1] > other_bbox[0])):   # Check for upper test > lower other
                 continue # If the boxes don't touch, don't bother
 
-            # Check sample points and exit early if there's a violation
-            # if any(other_piece.nearest.signed_distance(test_points) > tol):
-                # return False
             # Otherwise, do full volumetric collision detection.
-            if trimesh.boolean.intersection([test_piece, other_piece], check_volume=False).volume > tol:
+            if trimesh.boolean.intersection([test_mesh, other_mesh], check_volume=False).volume > tol:
                 return False
 
     return True  # No collision detected along the entire path
@@ -213,19 +213,13 @@ def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20, check_c
     # Convert single piece to list for uniform handling
     if not isinstance(pieces, (list, tuple)):
         pieces = [pieces]
-    other_meshes = [piece["mesh"] for piece in pieces if piece["id"] != this_pid]
-    # Convert single piece to list for uniform handling
-    if not isinstance(other_meshes, (list, tuple)):
-        other_meshes = [other_meshes]
+    other_meshes = [piece['mesh'] for piece in pieces if piece['id'] != this_pid]
     other_corners = []
     for piece in pieces:
-        if piece["id"] == this_piece["id"]:
+        if piece['id'] == this_piece['id']:
             continue
-        for cid, pos in piece["corners"]:
-            other_corners.append((piece["id"], cid, pos))
-    # Convert single piece to list for uniform handling
-    if not isinstance(other_corners, (list, tuple)):
-        other_corners = [other_corners]
+        for cid, pos in piece['corners']:
+            other_corners.append((piece['id'], cid, pos))
 
     # Restricted motions in (+x, -x, +y, -y, +z, -z)
     restricted = [False, False, False, False, False, False]
@@ -247,8 +241,8 @@ def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20, check_c
                               [0, dd, 0], [0, -dd, 0],
                               [0, 0, dd], [0, 0, -dd]])
         for i, test_vec in enumerate(test_vecs):
-            test_piece = this_piece['mesh'].copy()
-            if not check_path_clear(test_piece, other_meshes, test_vec, 1):
+            test_mesh = this_piece['mesh'].copy()
+            if not check_path_clear(test_mesh, other_meshes, test_vec, 1):
                 restricted[i] = True
     else:
         combinations = []
@@ -278,8 +272,8 @@ def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20, check_c
         unique_motions[key] = True # Save to seen motions if not
 
         # Check Path of Motion
-        test_piece = this_piece['mesh'].copy()
-        if not check_collision or check_path_clear(test_piece, other_meshes, vec, steps):
+        test_mesh = this_piece['mesh'].copy()
+        if not check_collision or check_path_clear(test_mesh, other_meshes, vec, steps):
             feasible_motions.append(((p1, c1), (p2, c2), vec))
 
     return feasible_motions
@@ -325,9 +319,7 @@ def create_arrow(move, pieces, floor, color=[0, 0, 0, 255]):
         end = floor['corners'][cid2][1]
     else:
         end = pieces[pid2]['corners'][cid2][1]
-    path = trimesh.load_path(np.array([
-        [start, end]
-    ]))
+    path = trimesh.load_path(np.array([[start, end]]))
     path.colors = np.array([color])
     return path
 
@@ -350,17 +342,16 @@ def move_piece(piece, translation):
     piece['corners'] = [(cid, pos+translation) for cid,pos in piece['corners']]
     return piece
 
-def get_top_k_scored_moves(pieces, assembly, target_offsets, k=float("inf"), mates_list=None, talk=True):
-    start_time = time.time()
-
+def get_top_k_scored_moves(pieces, active_pids, target_offsets, k=float("inf"), mates_list=None):
     # First quickly make a broad list of semi-verified moves, not checking for intermediate collision
     unverified = []
     unverified_counts = []
+    active_pieces = [piece for piece in pieces if piece['id'] in active_pids]
     for i in range(6):
-        new_unverified = get_feasible_motions(pieces[i], assembly, mates_list, steps=1, check_collision=False)
+        new_unverified = get_feasible_motions(pieces[i], active_pieces, mates_list, steps=1, check_collision=False)
         unverified = unverified + new_unverified
         unverified_counts.append(len(new_unverified))
-    unverified.append(((0,0),(0,0),np.array([0,0,0]))) # zero-action move
+    unverified.append(NULL_MOVE)
 
     # Then sort by score. 
     unverified_scored_moves = []
@@ -374,60 +365,90 @@ def get_top_k_scored_moves(pieces, assembly, target_offsets, k=float("inf"), mat
     for scored_move in unverified_scored_moves:
         _, ((pid1, _), (_, _), vec) = scored_move
         this_piece = pieces[pid1]
-        test_piece = this_piece['mesh'].copy()
-        assembly_meshes = [piece["mesh"] for piece in assembly if piece["id"] != pid1]
-        if check_path_clear(test_piece, assembly_meshes, vec, 20):
+        test_mesh = this_piece['mesh'].copy()
+        active_meshes = [piece['mesh'] for piece in active_pieces if piece['id'] != pid1]
+        if check_path_clear(test_mesh, active_meshes, vec, 20):
             feasible_scored_moves.append(scored_move)
             if len(feasible_scored_moves) == k:
                 break
     k = min(len(feasible_scored_moves), k)
-    if talk:
-        print(f"| Acquired Best {k} moves. This took {time.time() - start_time:.2f} seconds.")
-
     return feasible_scored_moves
 
-def get_moves_scored_lookahead(pieces, assembly, target_offsets, mates_list=None, top_k=2, lookahead = 2, rollout_depth=2):
+def get_moves_scored_lookahead(pieces, active_pids, target_offsets, mates_list=None, top_k=2, rollout_depth=2):
     print("Getting primary moves...")
-    top_moves = get_top_k_scored_moves(pieces, assembly, target_offsets, k=top_k, mates_list=mates_list)
+    top_moves = get_top_k_scored_moves(pieces, active_pids, target_offsets, k=top_k, mates_list=mates_list)
+    top_k = len(top_moves)
     print(f"| Looking Ahead from top {top_k} moves...")
-    
-    assembly_list = [piece['id'] for piece in assembly]
+
+    args_list = [
+        (move, pieces, active_pids, target_offsets, mates_list, rollout_depth, top_k)
+        for move in top_moves
+    ]
     scored_moves = []
-    for movei, move in enumerate(top_moves):
-        primary_cost, ((pid1,cid1),(pid2,cid2), vec) = move
-        # Test move with virtual objects
-        temp_piece = move_piece(copy.deepcopy(pieces[pid1]), vec)
-        temp_pieces = copy.deepcopy(pieces)
-        temp_pieces[pid1] = temp_piece
-        if not temp_piece['id'] in assembly_list:
-            temp_assembly = assembly + [temp_piece]
-        else:
-            temp_assembly = assembly
-
-        # Find best *secondary* move from new state
-        print(f"| | Rolling out from primary move {movei + 1}/{top_k}...")
-        start_time = time.time()
-
-        future_cost = greedy_rollout_score(temp_pieces, temp_assembly, target_offsets, mates_list, depth=rollout_depth)
-        total_score = primary_cost + future_cost
-        print(f"| | → Rollout total score: {total_score:.4f}. This all took {time.time() - start_time:.2f} seconds.")
-        scored_moves.append((total_score, ((pid1,cid1),(pid2,cid2), vec)))
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        for i, move in enumerate(executor.map(execute_2nd_lookahead, args_list)):
+            total_score, ((_,_),(_,_), _) = move
+            scored_moves.append(move)
+            print(f"| | Evaluated move {i+1:3d}/{top_k}. Score: {total_score:.2f}.")
 
     scored_moves.sort(key=lambda x: x[0])
     return scored_moves
 
-def greedy_rollout_score(pieces, assembly, target_offsets, mates_list, depth=2):
+def execute_2nd_lookahead(args):
+    move, pieces, active_pids, target_offsets, mates_list, depth, top_k = args
+    primary_cost, ((pid1, cid1), (pid2, cid2), vec) = move
+
+    temp_piece = move_piece(copy.deepcopy(pieces[pid1]), vec)
+    temp_pieces = copy.deepcopy(pieces)
+    temp_pieces[pid1] = temp_piece
+    temp_active_pids = active_pids + [temp_piece['id']] if temp_piece['id'] not in active_pids else active_pids
+
+    top_moves = get_top_k_scored_moves(temp_pieces, temp_active_pids, target_offsets, k=top_k, mates_list=mates_list)
+    top_k = len(top_moves)
+    
+    args_list = [
+        (move, temp_pieces, temp_active_pids, target_offsets, mates_list, depth)
+        for move in top_moves
+    ]
+    scored_moves = []
+    for i, _ in enumerate(top_moves):
+        best_move = execute_greedy(args_list[i])
+        scored_moves.append(best_move)
+        # print(f"| | | Evaluated move {i+1:3d}/{top_k}. Score: {best_move[0]:.2f}.")
+
+    scored_moves.sort(key=lambda x: x[0])
+    return scored_moves[0][0], ((pid1, cid1), (pid2, cid2), vec)
+
+def execute_greedy(args):
+    move, pieces, active_pids, target_offsets, mates_list, depth = args
+    primary_cost, ((pid1, cid1), (pid2, cid2), vec) = move
+
+    temp_piece = move_piece(copy.deepcopy(pieces[pid1]), vec)
+    temp_pieces = copy.deepcopy(pieces)
+    temp_pieces[pid1] = temp_piece
+    temp_active_pids = active_pids + [temp_piece['id']] if temp_piece['id'] not in active_pids else active_pids
+
+    future_cost = greedy_rollout_score(
+        temp_pieces,
+        temp_active_pids,
+        target_offsets,
+        mates_list,
+        depth=depth
+    )
+    total_score = primary_cost + future_cost
+    return (total_score, ((pid1, cid1), (pid2, cid2), vec))
+
+def greedy_rollout_score(pieces, active_pids, target_offsets, mates_list, depth=2):
     if depth == 0:
         return 0
 
-    start_time = time.time()
+    # start_time = time.time()
     best_cost = float("inf")
-    best_move = None
 
-    best_move = get_top_k_scored_moves(pieces, assembly, target_offsets, k=1, mates_list=mates_list, talk=False)
+    best_move = get_top_k_scored_moves(pieces, active_pids, target_offsets, k=1, mates_list=mates_list)
     best_cost, ((best_pid, _), (_, _), best_vec) = best_move[0]
-    x, y, z = best_vec
-    print(f"| | | Greedy: Best move is p{best_pid} moving by <{x: .0f},{y: .0f},{z: .0f}>. Depth to go: {depth-1}. This took {time.time() - start_time:.2f}s.")
+    # x, y, z = best_vec
+    # print(f"| | | Greedy: Best move is p{best_pid} moving by <{x: .0f},{y: .0f},{z: .0f}>. Depth to go: {depth-1}. This took {time.time() - start_time:.2f}s.")
     if best_move is None or best_cost == 0:
         return 0  # No valid move or best greedy move is zero.
 
@@ -435,14 +456,15 @@ def greedy_rollout_score(pieces, assembly, target_offsets, mates_list, depth=2):
     temp_piece = move_piece(copy.deepcopy(pieces[best_pid]), best_vec)
     temp_pieces = copy.deepcopy(pieces)
     temp_pieces[best_pid] = temp_piece
-    new_assembly = assembly + [temp_piece]
+    new_active_pids = active_pids + [temp_piece['id']] if temp_piece['id'] not in active_pids else active_pids
 
-    return best_cost + greedy_rollout_score(temp_pieces, new_assembly, target_offsets, mates_list, depth=depth-1)
+    return best_cost + greedy_rollout_score(temp_pieces, new_active_pids, target_offsets, mates_list, depth=depth-1)
 
 
 
 def render_scene(all_pieces, arrows=None, remake_pieces=True, camera = [14.0, -16.0, 20.0, 0.0]):
     scene = trimesh.Scene()
+    scene.camera_transform = get_transform_matrix(camera)
     if remake_pieces:
         for piece in all_pieces:
             pid = piece['id']
@@ -457,19 +479,14 @@ def render_scene(all_pieces, arrows=None, remake_pieces=True, camera = [14.0, -1
 
         for i, arrow in enumerate(arrows):
             scene.add_geometry(arrow, node_name=f"arrow_{i}")
-    scene.camera_transform = get_transform_matrix(camera)
     return scene
 
 def show_moves_scored(scored_moves, pieces, floor):
-    # Show moves, make the first one green, and make the next 19 black
+    num_moves = len(scored_moves)
+    hue_range = 0.333 * np.flip(np.arange(num_moves)) / num_moves
     arrows = []
     for i, (score, move) in enumerate(scored_moves):
-        if i == 0:
-            color = [0, 255, 0, 255]
-        elif i <= 19:
-            color = [0, 0, 0, 255]
-        else:
-            color = [0, 0, 0, 50]
+        color = colorsys.hsv_to_rgb(hue_range[i], 1, 1)
         arrows.append(create_arrow(move, pieces, floor, color=color))
     return arrows
 
@@ -509,7 +526,7 @@ def save_animation_frame(scene, index, out_dir="frames"):
 
     print(f"Saved frame {index} to {image_path}")
 
-def test_script(n_stages=12,top_k=8,lookahead=2,rollout_depth=8):
+def test_script(n_stages=30,top_k=20,rollout_depth=100, get_initial_mates=True, render=True):
     # Create Reference Pieces
     reference_pieces = define_all_burr_pieces(reference=True)
     target_offsets = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
@@ -527,41 +544,50 @@ def test_script(n_stages=12,top_k=8,lookahead=2,rollout_depth=8):
         piece = move_piece(piece, start_offsets[piece['id']])
     
     cost = cost_function(pieces, target_offsets)
-    print(f"Initial Cost Measure: {cost:.4f}")
+    print(f"Initial Cost Measure: {cost:.2f}")
 
     # Create initial scene
-    all_pieces = reference_pieces + pieces + [floor]
-    scene = render_scene(all_pieces)
-    save_animation_frame(scene, 0)
+    pieces_augmented = pieces + [floor]
+    all_pieces = reference_pieces + pieces_augmented
+    if render:
+        scene = render_scene(all_pieces)
+        save_animation_frame(scene, 0)
+    else:
+        scene = None
 
     # Precompute Mates (p1,c1), (p2,c2)
-    mates_list = get_valid_mates(pieces, floor)
-    # mates_list = None
+    if get_initial_mates:
+        mates_list = get_valid_mates(pieces, floor)
+    else:
+        mates_list = None
 
-    # Begin assembly set with the floor. The floor is a static base piece. 
-    assembly = [floor]
-    assembly_list = [FLOOR_INDEX_OFFSET]
+    # Begin assembly set (active pids) with the floor. The floor is a static base piece. 
+    active_pids = [FLOOR_INDEX_OFFSET]
     for stage in range(n_stages):
-        scored_moves = get_moves_scored_lookahead(pieces, assembly, target_offsets, mates_list, top_k=top_k, lookahead=lookahead, rollout_depth=rollout_depth)
+        start_time = time.time()
+        scored_moves = get_moves_scored_lookahead(pieces_augmented, active_pids, target_offsets, mates_list, top_k=top_k, rollout_depth=rollout_depth)
         best_move = scored_moves[0]
-        _, ((best_pid, _), (other_pid, _), best_vec) = best_move
+        best_cost, ((best_pid, _), (other_pid, _), best_vec) = best_move
         x, y, z = best_vec
         print(f"| → Best move: Piece {best_pid} → {other_pid}, vec = <{x: .0f},{y: .0f},{z: .0f}>.")
-        # Now execute, and add the moved piece to the assembly
+        # Now execute
         moved_piece = pieces[best_pid]
         moved_piece = move_piece(moved_piece, best_vec)
-        # Add part to assembly, if not there already
-        if not best_pid in assembly_list:
-            assembly.append(moved_piece)
-            assembly_list.append(best_pid)
-        print(f"→ Done with Stage {stage+1} / {n_stages}. New Cost: {cost_function(pieces, target_offsets):.4f}")
+        # Add part to active list, if not there already
+        active_pids = active_pids + [best_pid] if best_pid not in active_pids else active_pids
+        print(f"→ Done with Stage {stage+1} / {n_stages}. New Cost: {cost_function(pieces, target_offsets):.2f}. This took {time.time() - start_time:.2f} seconds.")
 
-        arrows = show_moves_scored(scored_moves, pieces, floor)
-        all_pieces = reference_pieces + pieces + [floor]
-        scene = render_scene(all_pieces, arrows)
-        save_animation_frame(scene, stage+1)
+        if render:
+            # arrows = show_moves_scored(scored_moves, pieces, floor)
+            # all_pieces = reference_pieces + pieces + [floor]
+            scene = render_scene(all_pieces)
+            save_animation_frame(scene, stage+1)
+        if cost_function(pieces, target_offsets) < 0.1:
+            return scene # If we're at zero cost, we're done.
+    return scene
+
+if __name__=="__main__":
+    start_time = time.time()
+    scene = test_script()
+    print(f"This script took {time.time() - start_time:4.0f} seconds")
     scene.show()
-start_time = time.time()
-test_script()
-print(f"This script took {time.time() - start_time:4.0f} seconds")
-
