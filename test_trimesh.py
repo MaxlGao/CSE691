@@ -8,13 +8,25 @@ import colorsys
 import concurrent.futures
 
 # Nomenclature
-# Scored Move = (Score, Move) = (Score, (Mate, Translation)) = (Score, ((pid1, cid1), (pid2, cid2), Translation))
-# Pieces = [Piece, ..., Piece] = [{Mesh, Corners, ID}, ..., Piece]
+# Scored Move = (Score, Move) 
+#             = (Score, (Mate[0], Mate[1], Translation, Robot Status)) 
+#             = (Score, ((pid1, cid1), (pid2, cid2), Translation, (Robot ID, Is Holding Piece)))
+# Pieces = [Piece, ..., Piece] 
+#        = [{Mesh, Corners, ID}, ..., Piece]
 
 np.set_printoptions(formatter={'int': '{:2d}'.format})
 REFERENCE_INDEX_OFFSET = 50 # Bump up reference piece indices
 FLOOR_INDEX_OFFSET = 100 # Bump up floor piece index
 NULL_MOVE = ((0,0),(0,0),np.array([0,0,0])) # Definition of zero action
+NUM_PIECES = 6
+UNINTERESTING_CORNERS = { # Uses Corner IDs according to find_cube_corners
+    1: {1, 5, 10, 12, 15, 21, 23, 29},
+    2: {1, 13, 14, 19, 21, 22, 28},
+    3: {6, 12, 20, 26},
+    4: {1, 2, 3, 4, 12, 19, 23},
+    5: {1, 6, 12, 17},
+    # piece 0: none
+}
 
 def find_cube_corners(mesh, tol=1e-6):
     """
@@ -95,9 +107,11 @@ def create_burr_piece(blocks, color, idx, reference=False):
     composite.process(validate=True)
     composite.visual.face_colors = color
     corners = find_cube_corners(composite)
+    bad_cids = UNINTERESTING_CORNERS.get(idx, set())
+    filtered_corners = [(cid, pos) for cid, pos in corners if cid not in bad_cids]
     if reference:
         idx += REFERENCE_INDEX_OFFSET
-    return {'mesh': composite, 'corners': corners, 'id': idx}
+    return {'mesh': composite, 'corners': filtered_corners, 'id': idx}
 
 def define_all_burr_pieces(reference=False):
     """
@@ -194,7 +208,7 @@ def check_path_clear(this_mesh, other_meshes, translation, steps=20, tol=0.01):
 
     return True  # No collision detected along the entire path
 
-def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20, check_collision=True):
+def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20, check_collision=True, is_being_held=False):
     """
     Compute feasible, unique linear motions from `this_piece` to any other in `pieces`.
 
@@ -347,7 +361,7 @@ def get_top_k_scored_moves(pieces, active_pids, target_offsets, k=float("inf"), 
     unverified = []
     unverified_counts = []
     active_pieces = [piece for piece in pieces if piece['id'] in active_pids]
-    for i in range(6):
+    for i in range(NUM_PIECES):
         new_unverified = get_feasible_motions(pieces[i], active_pieces, mates_list, steps=1, check_collision=False)
         unverified = unverified + new_unverified
         unverified_counts.append(len(new_unverified))
@@ -374,50 +388,53 @@ def get_top_k_scored_moves(pieces, active_pids, target_offsets, k=float("inf"), 
     k = min(len(feasible_scored_moves), k)
     return feasible_scored_moves
 
-def get_moves_scored_lookahead(pieces, active_pids, target_offsets, mates_list=None, top_k=2, rollout_depth=2):
+def get_moves_scored_lookahead(pieces, active_pids, target_offsets, mates_list=None, top_k=[float("inf"), 10], rollout_depth=2):
     print("Getting primary moves...")
-    top_moves = get_top_k_scored_moves(pieces, active_pids, target_offsets, k=top_k, mates_list=mates_list)
-    top_k = len(top_moves)
-    print(f"| Looking Ahead from top {top_k} moves...")
+    top_scored_moves = get_top_k_scored_moves(pieces, active_pids, target_offsets, k=top_k[0], mates_list=mates_list)
+    print(f"| Looking Ahead from top {len(top_scored_moves)} moves...")
 
     args_list = [
-        (move, pieces, active_pids, target_offsets, mates_list, rollout_depth, top_k)
-        for move in top_moves
+        (scored_move, pieces, active_pids, target_offsets, mates_list, rollout_depth, top_k[1])
+        for scored_move in top_scored_moves
     ]
-    scored_moves = []
+    new_scored_moves = []
+    start_time = time.time()
     with concurrent.futures.ProcessPoolExecutor() as executor:
-        for i, move in enumerate(executor.map(execute_2nd_lookahead, args_list)):
-            total_score, ((_,_),(_,_), _) = move
-            scored_moves.append(move)
-            print(f"| | Evaluated move {i+1:3d}/{top_k}. Score: {total_score:.2f}.")
+        for i, scored_move in enumerate(executor.map(execute_2nd_lookahead, args_list)):
+            new_scored_moves.append(scored_move)
+            if np.mod(i, 10) == 9:
+                print(f"| | Evaluated {i+1:3d} moves of {len(top_scored_moves)}. Running Time: {time.time() - start_time:.2f}")
 
-    scored_moves.sort(key=lambda x: x[0])
-    return scored_moves
+    new_scored_moves.sort(key=lambda x: x[0])
+    return new_scored_moves
 
 def execute_2nd_lookahead(args):
-    move, pieces, active_pids, target_offsets, mates_list, depth, top_k = args
-    primary_cost, ((pid1, cid1), (pid2, cid2), vec) = move
+    scored_move, pieces, active_pids, target_offsets, mates_list, depth, top_k = args
+    primary_cost, ((pid1, cid1), (pid2, cid2), vec) = scored_move
 
+    # Build a virtual assembly according to scored_move
     temp_piece = move_piece(copy.deepcopy(pieces[pid1]), vec)
     temp_pieces = copy.deepcopy(pieces)
     temp_pieces[pid1] = temp_piece
     temp_active_pids = active_pids + [temp_piece['id']] if temp_piece['id'] not in active_pids else active_pids
 
-    top_moves = get_top_k_scored_moves(temp_pieces, temp_active_pids, target_offsets, k=top_k, mates_list=mates_list)
-    top_k = len(top_moves)
+    top_scored_moves = get_top_k_scored_moves(temp_pieces, temp_active_pids, target_offsets, k=top_k, mates_list=mates_list)
+    top_k = len(top_scored_moves)
     
     args_list = [
-        (move, temp_pieces, temp_active_pids, target_offsets, mates_list, depth)
-        for move in top_moves
+        (scored_move, temp_pieces, temp_active_pids, target_offsets, mates_list, depth)
+        for scored_move in top_scored_moves
     ]
-    scored_moves = []
-    for i, _ in enumerate(top_moves):
+    new_scored_moves = []
+    for i, _ in enumerate(top_scored_moves):
         best_move = execute_greedy(args_list[i])
-        scored_moves.append(best_move)
+        new_scored_moves.append(best_move)
         # print(f"| | | Evaluated move {i+1:3d}/{top_k}. Score: {best_move[0]:.2f}.")
 
-    scored_moves.sort(key=lambda x: x[0])
-    return scored_moves[0][0], ((pid1, cid1), (pid2, cid2), vec)
+
+    new_scored_moves.sort(key=lambda x: x[0])
+    total_score = primary_cost + new_scored_moves[0][0]
+    return total_score, ((pid1, cid1), (pid2, cid2), vec)
 
 def execute_greedy(args):
     move, pieces, active_pids, target_offsets, mates_list, depth = args
@@ -526,13 +543,14 @@ def save_animation_frame(scene, index, out_dir="frames"):
 
     print(f"Saved frame {index} to {image_path}")
 
-def test_script(n_stages=30,top_k=20,rollout_depth=100, get_initial_mates=True, render=True):
-    # Create Reference Pieces
-    reference_pieces = define_all_burr_pieces(reference=True)
+def test_script(n_stages=30,top_k=[float("inf"), 3],rollout_depth=100, get_initial_mates=True, render=True, reference_pieces=[]):
     target_offsets = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
     target_offsets += [0,0,3]
-    for piece in reference_pieces:
-        piece = move_piece(piece, target_offsets[piece['id']-REFERENCE_INDEX_OFFSET])
+
+    # Create Reference Pieces
+    # reference_pieces = define_all_burr_pieces(reference=True)
+    # for piece in reference_pieces:
+    #     piece = move_piece(piece, target_offsets[piece['id']-REFERENCE_INDEX_OFFSET])
     
     # Create Floor
     floor = create_floor()
@@ -575,7 +593,8 @@ def test_script(n_stages=30,top_k=20,rollout_depth=100, get_initial_mates=True, 
         moved_piece = move_piece(moved_piece, best_vec)
         # Add part to active list, if not there already
         active_pids = active_pids + [best_pid] if best_pid not in active_pids else active_pids
-        print(f"→ Done with Stage {stage+1} / {n_stages}. New Cost: {cost_function(pieces, target_offsets):.2f}. This took {time.time() - start_time:.2f} seconds.")
+        print(f"→ Done with Stage {stage+1} / {n_stages}. This took {time.time() - start_time:.2f} seconds.")
+        print(f"Score Change: {get_cost_change(moved_piece, best_vec, target_offsets[best_pid]):.2f} immediate, {best_cost:.2f} long-term.")
 
         if render:
             # arrows = show_moves_scored(scored_moves, pieces, floor)
