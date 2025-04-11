@@ -11,8 +11,8 @@ from shapely.geometry import Point, Polygon
 
 # Nomenclature
 # Scored Move = (Scores, Move) 
-#             = (Scores, (Mate[0], Mate[1], Translation, Robot Status)) 
-#             = ([Score 0, Score 1, Rollout Score]], ((pid1, cid1), (pid2, cid2), Translation, (Robot ID, Is Holding Piece)))
+#             = (Scores, (Mate[0], Mate[1], Translation)) 
+#             = ([Score 0, Score 1, Rollout Score]], ((pid1, cid1), (pid2, cid2), Translation))
 # Pieces = [Piece, ..., Piece] 
 #        = [{Mesh, Corners, ID}, ..., Piece]
 
@@ -31,6 +31,7 @@ UNINTERESTING_CORNERS = { # Uses Corner IDs according to find_cube_corners
 }
 DOWN = np.array([0,0,-1])
 
+# Creation Functions
 def find_cube_corners(mesh, tol=1e-6):
     """
     Returns a list of tuples (index, TrackedArray([x, y, z])). xyz is position in body frame. 
@@ -178,7 +179,7 @@ def define_all_burr_pieces(start_offsets=None, reference=False):
     return pieces
 
 
-
+# Geometry Functions
 def check_path_clear(this_mesh, other_meshes, translation, steps=20, tol=0.01):
     """
     Check whether this_mesh can be translated without colliding with other meshes(s)
@@ -360,36 +361,8 @@ def is_supported(this_mesh, other_meshes):
     #     scene.show()
     return polygon.contains(Point(CoM_xy))
 
-def create_arrow(move, pieces, floor, color=[0, 0, 0, 255]):
-    """
-    Create a line-shaped arrow from start to end using a path.
-    
-    Returns a trimesh.path.Path3D object.
-    """
-    (pid1, cid1), (pid2, cid2), vec = move
-    start = pieces[pid1]['corners'][cid1][1]
-    if pid2 == FLOOR_INDEX_OFFSET:
-        end = floor['corners'][cid2][1]
-    else:
-        end = pieces[pid2]['corners'][cid2][1]
-    path = trimesh.load_path(np.array([[start, end]]))
-    path.colors = np.array([color])
-    return path
 
-def cost_function(pieces, target_offsets):
-    offsets = [piece['mesh'].bounding_box.centroid for piece in pieces]
-    diff = offsets - target_offsets
-    dist = [np.linalg.norm(dif) for dif in diff]
-    return sum(dist)
-
-def get_cost_change(piece, translation, target_offset):
-    current_location = piece['mesh'].bounding_box.centroid
-    current_cost = np.linalg.norm(current_location - target_offset)
-    new_location = current_location + translation
-    new_cost = np.linalg.norm(new_location - target_offset)
-    return new_cost - current_cost
-
-
+# Dynamic Programming Functions
 def move_piece(piece, translation):
     piece['mesh'].apply_translation(translation)
     piece['corners'] = [(cid, pos+translation) for cid,pos in piece['corners']]
@@ -520,8 +493,21 @@ def greedy_rollout_score(pieces, active_pids, target_offsets, mates_list, depth=
 
     return best_cost + greedy_rollout_score(temp_pieces, new_active_pids, target_offsets, mates_list, depth=depth-1)
 
+def cost_function(pieces, target_offsets):
+    offsets = [piece['mesh'].bounding_box.centroid for piece in pieces]
+    diff = offsets - target_offsets
+    dist = [np.linalg.norm(dif) for dif in diff]
+    return sum(dist)
+
+def get_cost_change(piece, translation, target_offset):
+    current_location = piece['mesh'].bounding_box.centroid
+    current_cost = np.linalg.norm(current_location - target_offset)
+    new_location = current_location + translation
+    new_cost = np.linalg.norm(new_location - target_offset)
+    return new_cost - current_cost
 
 
+# Rendering Scripts
 def render_scene(all_pieces, arrows=None, remake_pieces=True, camera = [14.0, -16.0, 20.0, 0.0]):
     scene = trimesh.Scene()
     scene.camera_transform = get_transform_matrix(camera)
@@ -540,14 +526,35 @@ def render_scene(all_pieces, arrows=None, remake_pieces=True, camera = [14.0, -1
             scene.add_geometry(arrow, node_name=f"arrow_{i}")
     return scene
 
-def show_moves_scored(scored_moves, pieces, floor):
+def show_moves_scored(scored_moves, pieces, floor, opacity=0.6):
     num_moves = len(scored_moves)
-    hue_range = 0.333 * np.flip(np.arange(num_moves)) / num_moves
+    # hue_range = 0.333 * np.flip(np.arange(num_moves)) / num_moves
     arrows = []
     for i, (score, move) in enumerate(scored_moves):
-        color = colorsys.hsv_to_rgb(hue_range[i], 1, 1)
+        # color = colorsys.hsv_to_rgb(hue_range[i], 1, 1)
+        color = [0, 0, 0, 1-float(i)/num_moves]
+        # color =  + [opacity]
+        # color = np.floor(256*color) + [opacity]
         arrows.append(create_arrow(move, pieces, floor, color=color))
     return arrows
+
+def create_arrow(move, pieces, floor, color=[0, 0, 0, 255]):
+    """
+    Create a line-shaped arrow from start to end using a path.
+    
+    Returns a trimesh.path.Path3D object.
+    """
+    (pid1, cid1), (pid2, cid2), vec = move
+    start_corners_dict = dict(pieces[pid1]['corners'])
+    start = start_corners_dict[cid1]
+    if pid2 == FLOOR_INDEX_OFFSET:
+        end = floor['corners'][cid2][1]
+    else:
+        end_corners_dict = dict(pieces[pid2]['corners'])
+        end = end_corners_dict[cid2]
+    path = trimesh.load_path(np.array([[start, end]]))
+    path.colors = np.array([color])
+    return path
 
 def show_corners(scene, piece):
     for cid, pos in piece['corners']:
@@ -574,11 +581,11 @@ def get_transform_matrix(position):
     transform[:3, 3] = [x, y, z]     # Position
     return transform
 
-def save_animation_frame(scene, index, out_dir="frames"):
+def save_animation_frame(scene, index, out_dir="frames", suffix=''):
     os.makedirs(out_dir, exist_ok=True)
 
     # Save as image
-    image_path = os.path.join(out_dir, f"frame_{index:03d}.png")
+    image_path = os.path.join(out_dir, f"frame_{index:03d}{suffix}.png")
     png = scene.save_image(resolution=(800, 600), visible=True)
     with open(image_path, 'wb') as f:
         f.write(png)
@@ -600,7 +607,7 @@ def save_mates_list(mates_list, filename='cache/mates_list.pkl'):
         pickle.dump(mates_list, f)
         print(f"Saved mates_list to {filename}")
 
-def save_simulation_state(step_id, pieces, active_pids, all_scored_moves, metadata=None, folder='logs'):
+def save_simulation_state(step_id, pieces, active_pids, all_scored_moves, metadata=None, folder='logs', suffix=''):
     os.makedirs(folder, exist_ok=True)
     data = {
         'pieces': pieces,
@@ -608,78 +615,107 @@ def save_simulation_state(step_id, pieces, active_pids, all_scored_moves, metada
         'available_moves': all_scored_moves,
         'metadata': metadata or {}
     }
-    with open(f'{folder}/step_{step_id:03d}.pkl', 'wb') as f:
+    with open(f'{folder}/step_{step_id:03d}{suffix}.pkl', 'wb') as f:
         pickle.dump(data, f)
 
 def load_simulation_state(step_id, folder='logs'):
     with open(f'{folder}/step_{step_id:03d}.pkl', 'rb') as f:
         return pickle.load(f)
 
-def run_assembler(n_stages=16,top_k=[float("inf"), float("inf")], rollout_depth=3, render=False, show_reference=False, show_all_scores=True):
+
+# Top-Level Scripts
+def run_assembler(n_stages=16,top_k=[float("inf"), float("inf")], rollout_depth=3, render=False, show_all_scores=True, start_from=None):
     target_offsets = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
     target_offsets += [0,0,3]
 
-    # Create Reference Pieces
-    if show_reference:
+    # Begin assembly set (active pids) with the floor. The floor is a static base piece. 
+    if start_from is None:
+        # Create Reference Pieces
         reference_pieces = define_all_burr_pieces(reference=True)
         for piece in reference_pieces:
             piece = move_piece(piece, target_offsets[piece['id']-REFERENCE_INDEX_OFFSET])
-    else:
-        reference_pieces = []
-    
-    # Create Floor and Real Pieces
-    floor = create_floor()
-    start_offsets = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
-    pieces = define_all_burr_pieces(start_offsets)
-    
-    cost = cost_function(pieces, target_offsets)
-    print(f"Initial Cost Measure: {cost:.2f}")
+        
+        # Create Floor and Real Pieces
+        floor = create_floor()
+        start_offsets = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
+        pieces = define_all_burr_pieces(start_offsets)
+        
+        cost = cost_function(pieces, target_offsets)
+        print(f"Initial Cost Measure: {cost:.2f}")
 
-    # Create initial scene
-    pieces_augmented = pieces + [floor]
-    all_pieces = reference_pieces + pieces_augmented
-    if render:
-        scene = render_scene(all_pieces)
-        save_animation_frame(scene, 0)
-    else:
-        scene = None
+        # Create initial scene
+        pieces_augmented = pieces + [floor]
+        all_pieces = reference_pieces + pieces_augmented
+        if render:
+            scene = render_scene(all_pieces)
+            save_animation_frame(scene, 0)
+        else:
+            scene = None
 
+        active_pids = [FLOOR_INDEX_OFFSET]
+        start_from = 0
+    else:
+        # An awkward setup where a given start_from can be 0, which means to load all data about stage 0, which can contain a lot of scored move data.
+        state = load_simulation_state(start_from)
+        pieces_augmented, active_pids, scored_moves = state
+        print(f"| Loaded {len(scored_moves)} moves.")
+        best_move = scored_moves[0]
+        best_costs, ((best_pid, _), (other_pid, _), best_vec) = best_move
+        lookahead_1, lookahead_2, rollout = best_costs
+        x, y, z = best_vec
+        print(f"| → Best move: Piece {best_pid} → {other_pid}, vec = <{x: .0f},{y: .0f},{z: .0f}>.")
+        # Here, it is easiest to just execute the move and start from start_from+1. Most of the heavy lifting comes from calculating moves.
+        moved_piece = pieces[best_pid]
+        moved_piece = move_piece(moved_piece, best_vec)
+        if render:
+            scene = render_scene(pieces_augmented)
+            save_animation_frame(scene, start_from+1)
+        active_pids = active_pids + [best_pid] if best_pid not in active_pids else active_pids
+        print(f"→ Fast-Finished {stage+1} / {n_stages}.")
+        print(f"Score [Lookahead 1, Lookahead 2, Rollout]: [{lookahead_1:.2f}, {lookahead_2:.2f}, {rollout:.2f}] long-term.")
+
+        if cost_function(pieces, target_offsets) < 0.1:
+            return scene # If we're at zero cost, we're done.
+        
+        start_from += 1
+    
     # Precompute Mates (p1,c1), (p2,c2)
     mates_list = load_mates_list()
     if mates_list is None:
         mates_list = get_valid_mates(pieces, floor)
         save_mates_list(mates_list)
 
-    # Begin assembly set (active pids) with the floor. The floor is a static base piece. 
-    active_pids = [FLOOR_INDEX_OFFSET]
-    for stage in range(n_stages):
+    for stage in range(start_from, n_stages):
         start_time = time.time()
         scored_moves = get_moves_scored_lookahead(pieces_augmented, active_pids, target_offsets, mates_list, top_k=top_k, rollout_depth=rollout_depth, show_all_scores=show_all_scores)
-        print(f"| Processed {len(scored_moves)} moves.")
+        print(f"| | Processed {len(scored_moves)} moves.")
         best_move = scored_moves[0]
         best_costs, ((best_pid, _), (other_pid, _), best_vec) = best_move
         lookahead_1, lookahead_2, rollout = best_costs
         x, y, z = best_vec
         print(f"| → Best move: Piece {best_pid} → {other_pid}, vec = <{x: .0f},{y: .0f},{z: .0f}>.")
+        if render:
+            arrows = show_moves_scored(scored_moves, pieces, floor)
+            scene = render_scene(pieces_augmented, arrows=arrows)
+            save_animation_frame(scene, stage, suffix='a')
+        save_simulation_state(stage, pieces_augmented, active_pids, scored_moves)
+        
         # Now execute
         moved_piece = pieces[best_pid]
         moved_piece = move_piece(moved_piece, best_vec)
-        # Add part to active list, if not there already
+        if render:
+            scene = render_scene(pieces_augmented)
+            save_animation_frame(scene, stage+1)
         active_pids = active_pids + [best_pid] if best_pid not in active_pids else active_pids
-        save_simulation_state(stage, pieces_augmented, active_pids, scored_moves)
         print(f"→ Done with Stage {stage+1} / {n_stages}. This took {time.time() - start_time:.2f} seconds.")
         print(f"Score [Lookahead 1, Lookahead 2, Rollout]: [{lookahead_1:.2f}, {lookahead_2:.2f}, {rollout:.2f}] long-term.")
 
-        if render:
-            # arrows = show_moves_scored(scored_moves, pieces, floor)
-            # all_pieces = reference_pieces + pieces + [floor]
-            scene = render_scene(all_pieces)
-            save_animation_frame(scene, stage+1)
         if cost_function(pieces, target_offsets) < 0.1:
             return scene # If we're at zero cost, we're done.
     return scene
 
-def test_support(): # Example script running through mates and checking which ones need support. For verifying support finder only.
+# Example script running through mates and checking which ones need support. For verifying support finder only.
+def test_support(): 
     # Create Floor and Real Pieces
     floor = create_floor()
     start_offsets = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
@@ -745,9 +781,58 @@ def test_support(): # Example script running through mates and checking which on
     print(f"There are {supports.count(True)} configurations with support and {supports.count(False)} without.")
     return
 
+# Place two pieces and draw arrows between all feasible mates
+def display_connections():
+    target_offsets = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
+    target_offsets += [0,0,3]
+
+    # Create Reference Pieces
+    reference_pieces = define_all_burr_pieces(reference=True)
+    for piece in reference_pieces:
+        piece = move_piece(piece, target_offsets[piece['id']-REFERENCE_INDEX_OFFSET])
+    
+    # Create Floor and Real Pieces
+    floor = create_floor()
+    start_offsets = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
+    pieces = define_all_burr_pieces(start_offsets)
+    
+    # Move Piece 3 to its correct location
+    # pieces[3] = move_piece(pieces[3], target_offsets[3] - start_offsets[3])
+    # pieces[5] = move_piece(pieces[5], [0, -16, 0])
+
+    # Create initial scene
+    pieces_augmented = pieces + [floor]
+    all_pieces = reference_pieces + pieces_augmented
+    scene = render_scene(all_pieces)
+
+    # Precompute Mates (p1,c1), (p2,c2)
+    mates_list = load_mates_list()
+    if mates_list is None:
+        mates_list = get_valid_mates(pieces, floor)
+        save_mates_list(mates_list)
+
+    # Do a mock assembly looking through all immediately available moves 
+    active_pids = [FLOOR_INDEX_OFFSET]
+    scored_moves = get_top_k_scored_moves(pieces_augmented, active_pids, target_offsets, mates_list=mates_list)
+    # print(f"| Processed {len(scored_moves)} moves.")
+
+    # Filter to only look at piece 5
+    # scored_moves = [scored_move for scored_move in scored_moves if scored_move[1][0][0] == 5]
+    # print(f"| Filtered to {len(scored_moves)} moves.")
+
+    arrows = show_moves_scored(scored_moves, pieces, floor)
+    # Filter arrows list to be every 4th arrow
+    # arrows = [arrow for i, arrow in enumerate(arrows) if np.mod(i, 4) == 0]
+    # print(f"| Filtered to {len(arrows)} moves.")
+
+    # scene_pieces = [reference_pieces[3], reference_pieces[5], pieces[3], pieces[5], floor]
+    scene = render_scene(pieces_augmented, arrows=arrows)
+    return scene
+
 if __name__=="__main__":
     start_time = time.time()
-    # scene = run_assembler()
+    # scene = display_connections()
+    scene = run_assembler(n_stages=30, top_k=[float("inf"), 1], rollout_depth=100, render=True)
     # for sc in range(17):
     #     state = load_simulation_state(sc)
     #     scene = render_scene(state['pieces'])
