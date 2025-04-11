@@ -3,14 +3,16 @@ import numpy as np
 import time
 import copy
 import imageio
+import pickle
 import os
 import colorsys
 import concurrent.futures
+from shapely.geometry import Point, Polygon
 
 # Nomenclature
-# Scored Move = (Score, Move) 
-#             = (Score, (Mate[0], Mate[1], Translation, Robot Status)) 
-#             = (Score, ((pid1, cid1), (pid2, cid2), Translation, (Robot ID, Is Holding Piece)))
+# Scored Move = (Scores, Move) 
+#             = (Scores, (Mate[0], Mate[1], Translation, Robot Status)) 
+#             = ([Score 0, Score 1, Rollout Score]], ((pid1, cid1), (pid2, cid2), Translation, (Robot ID, Is Holding Piece)))
 # Pieces = [Piece, ..., Piece] 
 #        = [{Mesh, Corners, ID}, ..., Piece]
 
@@ -27,6 +29,7 @@ UNINTERESTING_CORNERS = { # Uses Corner IDs according to find_cube_corners
     5: {1, 6, 12, 17},
     # piece 0: none
 }
+DOWN = np.array([0,0,-1])
 
 def find_cube_corners(mesh, tol=1e-6):
     """
@@ -113,7 +116,7 @@ def create_burr_piece(blocks, color, idx, reference=False):
         idx += REFERENCE_INDEX_OFFSET
     return {'mesh': composite, 'corners': filtered_corners, 'id': idx}
 
-def define_all_burr_pieces(reference=False):
+def define_all_burr_pieces(start_offsets=None, reference=False):
     """
     Returns a list of dicts: {'mesh': trimesh.Trimesh, 'corners': list of (index, position)}
     """
@@ -168,6 +171,10 @@ def define_all_burr_pieces(reference=False):
         {'size': [1, 2, 1], 'position': [2.5, 0, 0.5]},
         {'size': [1, 2, 1], 'position': [-2.5, 0, 0.5]},
     ], colors[5], 5, reference=reference))
+
+    if start_offsets is not None:
+        for piece in pieces:
+            piece = move_piece(piece, start_offsets[piece['id']])
     return pieces
 
 
@@ -320,6 +327,38 @@ def get_valid_mates(pieces, floor):
     print(f"→ For this assembly, there are {cache_length} valid piece-to-piece mates")
     return cache
 
+def is_supported(this_mesh, other_meshes):
+    offset = 0.01 * DOWN
+    translated = this_mesh.copy()
+    translated.apply_translation(offset)
+
+    intersects = []
+    for other_mesh in other_meshes:
+        intersect = trimesh.boolean.intersection([translated, other_mesh], check_volume=False)
+        if not intersect.is_empty and intersect.volume > 0.001:
+            intersect = intersect.convex_hull
+            intersects.append(intersect)
+    if len(intersects) > 0:
+        try:
+            intersection = trimesh.boolean.union(intersects)
+        except:
+            scene = trimesh.Scene()
+            scene.camera_transform = get_transform_matrix([14.0, -16.0, 20.0, 0.0])
+            scene.add_geometry(intersects[0], node_name=f"intersect")
+            scene.show()
+        intersection_cvhull = intersection.convex_hull
+    else:
+        return False # No intersects means no support
+
+    CoM_xy = this_mesh.center_mass[0:2] # only interested in x/y coordinate, if Z is down
+    hull_points_xy = intersection_cvhull.vertices[:, :2]
+    polygon = Polygon(hull_points_xy).convex_hull
+    # if polygon.contains(Point(CoM_xy)):
+    #     scene = trimesh.Scene()
+    #     scene.camera_transform = get_transform_matrix([14.0, -16.0, 20.0, 0.0])
+    #     scene.add_geometry(intersection_cvhull, node_name=f"intersect")
+    #     scene.show()
+    return polygon.contains(Point(CoM_xy))
 
 def create_arrow(move, pieces, floor, color=[0, 0, 0, 255]):
     """
@@ -388,28 +427,28 @@ def get_top_k_scored_moves(pieces, active_pids, target_offsets, k=float("inf"), 
     k = min(len(feasible_scored_moves), k)
     return feasible_scored_moves
 
-def get_moves_scored_lookahead(pieces, active_pids, target_offsets, mates_list=None, top_k=[float("inf"), 10], rollout_depth=2):
+def get_moves_scored_lookahead(pieces, active_pids, target_offsets, mates_list=None, top_k=[float("inf"), 10], rollout_depth=2, show_all_scores=False):
     print("Getting primary moves...")
     top_scored_moves = get_top_k_scored_moves(pieces, active_pids, target_offsets, k=top_k[0], mates_list=mates_list)
     print(f"| Looking Ahead from top {len(top_scored_moves)} moves...")
 
     args_list = [
-        (scored_move, pieces, active_pids, target_offsets, mates_list, rollout_depth, top_k[1])
+        (scored_move, pieces, active_pids, target_offsets, mates_list, rollout_depth, top_k[1], show_all_scores)
         for scored_move in top_scored_moves
     ]
     new_scored_moves = []
     start_time = time.time()
     with concurrent.futures.ProcessPoolExecutor() as executor:
         for i, scored_move in enumerate(executor.map(execute_2nd_lookahead, args_list)):
-            new_scored_moves.append(scored_move)
-            if np.mod(i, 10) == 9:
+            new_scored_moves = new_scored_moves + scored_move
+            if np.mod(i, 50) == 49:
                 print(f"| | Evaluated {i+1:3d} moves of {len(top_scored_moves)}. Running Time: {time.time() - start_time:.2f}")
 
-    new_scored_moves.sort(key=lambda x: x[0])
+    new_scored_moves.sort(key=lambda x: sum(x[0]))
     return new_scored_moves
 
 def execute_2nd_lookahead(args):
-    scored_move, pieces, active_pids, target_offsets, mates_list, depth, top_k = args
+    scored_move, pieces, active_pids, target_offsets, mates_list, depth, top_k, show_all_scores = args
     primary_cost, ((pid1, cid1), (pid2, cid2), vec) = scored_move
 
     # Build a virtual assembly according to scored_move
@@ -427,14 +466,18 @@ def execute_2nd_lookahead(args):
     ]
     new_scored_moves = []
     for i, _ in enumerate(top_scored_moves):
-        best_move = execute_greedy(args_list[i])
-        new_scored_moves.append(best_move)
+        best_scored_move = execute_greedy(args_list[i])
+        new_scored_moves.append(best_scored_move)
         # print(f"| | | Evaluated move {i+1:3d}/{top_k}. Score: {best_move[0]:.2f}.")
 
 
-    new_scored_moves.sort(key=lambda x: x[0])
-    total_score = primary_cost + new_scored_moves[0][0]
-    return total_score, ((pid1, cid1), (pid2, cid2), vec)
+    new_scored_moves.sort(key=lambda x: sum(x[0]))
+    if show_all_scores:
+        all_scored_moves = [([primary_cost] + scored_move[0], ((pid1, cid1), (pid2, cid2), vec)) for scored_move in new_scored_moves]
+        return all_scored_moves
+    else:
+        total_scores = [primary_cost] + new_scored_moves[0][0]
+        return total_scores, ((pid1, cid1), (pid2, cid2), vec)
 
 def execute_greedy(args):
     move, pieces, active_pids, target_offsets, mates_list, depth = args
@@ -452,8 +495,8 @@ def execute_greedy(args):
         mates_list,
         depth=depth
     )
-    total_score = primary_cost + future_cost
-    return (total_score, ((pid1, cid1), (pid2, cid2), vec))
+    scores = [primary_cost] + [future_cost]
+    return (scores, ((pid1, cid1), (pid2, cid2), vec))
 
 def greedy_rollout_score(pieces, active_pids, target_offsets, mates_list, depth=2):
     if depth == 0:
@@ -482,12 +525,11 @@ def greedy_rollout_score(pieces, active_pids, target_offsets, mates_list, depth=
 def render_scene(all_pieces, arrows=None, remake_pieces=True, camera = [14.0, -16.0, 20.0, 0.0]):
     scene = trimesh.Scene()
     scene.camera_transform = get_transform_matrix(camera)
-    if remake_pieces:
-        for piece in all_pieces:
-            pid = piece['id']
-            scene.add_geometry(piece['mesh'], node_name=f"piece_{pid}")
-            if pid == FLOOR_INDEX_OFFSET or pid < REFERENCE_INDEX_OFFSET:
-                show_corners(scene, piece)
+    for piece in all_pieces:
+        pid = piece['id']
+        scene.add_geometry(piece['mesh'], node_name=f"piece_{pid}")
+        if pid == FLOOR_INDEX_OFFSET or pid < REFERENCE_INDEX_OFFSET:
+            show_corners(scene, piece)
     if arrows:
         # Remove old arrows
         arrow_nodes = [name for name in scene.graph.nodes_geometry if name.startswith('arrow_')]
@@ -543,23 +585,52 @@ def save_animation_frame(scene, index, out_dir="frames"):
 
     print(f"Saved frame {index} to {image_path}")
 
-def test_script(n_stages=30,top_k=[float("inf"), 3],rollout_depth=100, get_initial_mates=True, render=True, reference_pieces=[]):
+def load_mates_list(filename='cache/mates_list.pkl'):
+    if os.path.exists(filename):
+        with open(filename, 'rb') as f:
+            print("Loaded mates_list from file.")
+            return pickle.load(f)
+    else:
+        print("No cached mates_list found.")
+        return None
+
+def save_mates_list(mates_list, filename='cache/mates_list.pkl'):
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    with open(filename, 'wb') as f:
+        pickle.dump(mates_list, f)
+        print(f"Saved mates_list to {filename}")
+
+def save_simulation_state(step_id, pieces, active_pids, all_scored_moves, metadata=None, folder='logs'):
+    os.makedirs(folder, exist_ok=True)
+    data = {
+        'pieces': pieces,
+        'assembly': active_pids,
+        'available_moves': all_scored_moves,
+        'metadata': metadata or {}
+    }
+    with open(f'{folder}/step_{step_id:03d}.pkl', 'wb') as f:
+        pickle.dump(data, f)
+
+def load_simulation_state(step_id, folder='logs'):
+    with open(f'{folder}/step_{step_id:03d}.pkl', 'rb') as f:
+        return pickle.load(f)
+
+def run_assembler(n_stages=16,top_k=[float("inf"), float("inf")], rollout_depth=3, render=False, show_reference=False, show_all_scores=True):
     target_offsets = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
     target_offsets += [0,0,3]
 
     # Create Reference Pieces
-    # reference_pieces = define_all_burr_pieces(reference=True)
-    # for piece in reference_pieces:
-    #     piece = move_piece(piece, target_offsets[piece['id']-REFERENCE_INDEX_OFFSET])
+    if show_reference:
+        reference_pieces = define_all_burr_pieces(reference=True)
+        for piece in reference_pieces:
+            piece = move_piece(piece, target_offsets[piece['id']-REFERENCE_INDEX_OFFSET])
+    else:
+        reference_pieces = []
     
-    # Create Floor
+    # Create Floor and Real Pieces
     floor = create_floor()
-    
-    # Create Real Pieces
-    pieces = define_all_burr_pieces()
     start_offsets = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
-    for piece in pieces:
-        piece = move_piece(piece, start_offsets[piece['id']])
+    pieces = define_all_burr_pieces(start_offsets)
     
     cost = cost_function(pieces, target_offsets)
     print(f"Initial Cost Measure: {cost:.2f}")
@@ -574,18 +645,20 @@ def test_script(n_stages=30,top_k=[float("inf"), 3],rollout_depth=100, get_initi
         scene = None
 
     # Precompute Mates (p1,c1), (p2,c2)
-    if get_initial_mates:
+    mates_list = load_mates_list()
+    if mates_list is None:
         mates_list = get_valid_mates(pieces, floor)
-    else:
-        mates_list = None
+        save_mates_list(mates_list)
 
     # Begin assembly set (active pids) with the floor. The floor is a static base piece. 
     active_pids = [FLOOR_INDEX_OFFSET]
     for stage in range(n_stages):
         start_time = time.time()
-        scored_moves = get_moves_scored_lookahead(pieces_augmented, active_pids, target_offsets, mates_list, top_k=top_k, rollout_depth=rollout_depth)
+        scored_moves = get_moves_scored_lookahead(pieces_augmented, active_pids, target_offsets, mates_list, top_k=top_k, rollout_depth=rollout_depth, show_all_scores=show_all_scores)
+        print(f"| Processed {len(scored_moves)} moves.")
         best_move = scored_moves[0]
-        best_cost, ((best_pid, _), (other_pid, _), best_vec) = best_move
+        best_costs, ((best_pid, _), (other_pid, _), best_vec) = best_move
+        lookahead_1, lookahead_2, rollout = best_costs
         x, y, z = best_vec
         print(f"| → Best move: Piece {best_pid} → {other_pid}, vec = <{x: .0f},{y: .0f},{z: .0f}>.")
         # Now execute
@@ -593,8 +666,9 @@ def test_script(n_stages=30,top_k=[float("inf"), 3],rollout_depth=100, get_initi
         moved_piece = move_piece(moved_piece, best_vec)
         # Add part to active list, if not there already
         active_pids = active_pids + [best_pid] if best_pid not in active_pids else active_pids
+        save_simulation_state(stage, pieces_augmented, active_pids, scored_moves)
         print(f"→ Done with Stage {stage+1} / {n_stages}. This took {time.time() - start_time:.2f} seconds.")
-        print(f"Score Change: {get_cost_change(moved_piece, best_vec, target_offsets[best_pid]):.2f} immediate, {best_cost:.2f} long-term.")
+        print(f"Score [Lookahead 1, Lookahead 2, Rollout]: [{lookahead_1:.2f}, {lookahead_2:.2f}, {rollout:.2f}] long-term.")
 
         if render:
             # arrows = show_moves_scored(scored_moves, pieces, floor)
@@ -605,8 +679,78 @@ def test_script(n_stages=30,top_k=[float("inf"), 3],rollout_depth=100, get_initi
             return scene # If we're at zero cost, we're done.
     return scene
 
+def test_support(): # Example script running through mates and checking which ones need support. For verifying support finder only.
+    # Create Floor and Real Pieces
+    floor = create_floor()
+    start_offsets = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
+    pieces = define_all_burr_pieces(start_offsets)
+    
+    # Create initial scene
+    all_pieces = pieces + [floor]
+
+    # Precompute Mates (p1,c1), (p2,c2)
+    mates_list = load_mates_list()
+    if mates_list is None:
+        mates_list = get_valid_mates(pieces, floor)
+        save_mates_list(mates_list)
+
+    supports = []
+    for this_piece in pieces:
+        this_pid = this_piece['id']
+        this_corners = this_piece['corners']
+
+        other_meshes = [piece['mesh'] for piece in all_pieces if piece['id'] != this_pid]
+        other_meshes_not_floor = [piece['mesh'] for piece in pieces if piece['id'] != this_pid]
+        other_corners = []
+        for piece in all_pieces:
+            if piece['id'] == this_piece['id']:
+                continue
+            for cid, pos in piece['corners']:
+                other_corners.append((piece['id'], cid, pos))
+
+        this_mates_list = mates_list[this_pid] # Mates pertaining to this piece
+        # Match corners to actual positions
+        this_corner_dict = {cid: pos for cid, pos in this_corners}
+        other_corner_dict = {(pid, cid): pos for (pid,cid,pos) in other_corners}
+        available_pieces = {p['id'] for p in pieces}
+        combinations = [
+            ((this_pid, cid1), (pid2, cid2), other_corner_dict[(pid2, cid2)] - this_corner_dict[cid1])
+            for ((pid1, cid1), (pid2, cid2)) in this_mates_list
+            if pid2 in available_pieces
+        ]
+
+        for (p1, c1), (p2, c2), vec in combinations:
+            # Check Support
+            test_piece = copy.deepcopy(this_piece)
+            test_piece = move_piece(test_piece, vec)
+            test_mesh = test_piece['mesh']
+            test_bbox = test_mesh.bounds
+            collide = False
+            for other_mesh in other_meshes:
+                other_bbox = other_mesh.bounds
+                if (all(test_bbox[0] < other_bbox[1]) and # Check for lower test < upper other
+                    all(test_bbox[1] > other_bbox[0])):   # Check for upper test > lower other
+                    collide = True
+            if collide:
+                supports.append(False)
+                continue
+            if test_bbox[0][2] == 0:
+                supports.append(True) # Equivalent to the block being on the floor. Thus, we don't include the floor in support checks.
+                continue
+            support = is_supported(test_mesh, other_meshes_not_floor)
+            supports.append(support)
+            # if support and vec[2] > 0: # Show cases where a piece lays on top of another.
+            #     scene = render_scene(all_pieces + [test_piece])
+            #     scene.show()
+    print(f"There are {supports.count(True)} configurations with support and {supports.count(False)} without.")
+    return
+
 if __name__=="__main__":
     start_time = time.time()
-    scene = test_script()
-    print(f"This script took {time.time() - start_time:4.0f} seconds")
-    scene.show()
+    # scene = run_assembler()
+    # for sc in range(17):
+    #     state = load_simulation_state(sc)
+    #     scene = render_scene(state['pieces'])
+    #     save_animation_frame(scene, sc+1)
+    print(f"This script took {time.time() - start_time:4f} seconds")
+    # scene.show()
