@@ -458,6 +458,7 @@ def show_moves_scored(scene, scored_moves, pieces, floor):
 
 def test_script():
     scene = trimesh.Scene()
+    start_time = time.time()
     # Create Reference Pieces
     reference_pieces = define_all_burr_pieces(reference=True)
     target_offsets = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
@@ -495,22 +496,31 @@ def test_script():
     assembly_list = [100]
     n_stages = 8
     for stage in range(n_stages):
-        scored_moves = get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets)
+        # Dynamically adjust rollout depth based on the stage
+        if stage < n_stages - 2:
+            rollout_depth = 2  # Shallow lookahead for early stages
+        else:
+            rollout_depth = 6  # Deeper lookahead for later stages
+
+        print(f"Stage {stage + 1}/{n_stages}: Using rollout depth = {rollout_depth}")
+        scored_moves = get_moves_scored_lookahead(pieces, assembly, mates_list, target_offsets, rollout_depth=rollout_depth)
         best_move = scored_moves[0]
         best_cost, ((best_pid, _), (other_pid, _), best_vec) = best_move
         print(f"Best move: Piece {best_pid} → {other_pid}, vec = {best_vec}.")
         show_moves_scored(scene, scored_moves, pieces, floor)
-        # Now execute, and add the moved piece to the assembly
+        # Execute the best move and update the assembly
         moved_piece = pieces[best_pid]
         translation = best_vec
         moved_piece = move_piece(moved_piece, translation)
-        # Add part to assembly, if not there already
         if not moved_piece['id'] in assembly_list:
             assembly.append(moved_piece)
             assembly_list.append(moved_piece['id'])
         show_corners(scene, moved_piece)
-        print(f"Done with Stage {stage+1} / {n_stages}. New Cost: {cost_function(pieces, target_offsets):.4f}")
+        print(f"Done with Stage {stage + 1}/{n_stages}. New Cost: {cost_function(pieces, target_offsets):.4f}")
         # print(f"Assembly consists of {assembly_list}")
+        print(f"Final cost: {cost_function(pieces, target_offsets):.4f}")
+        print(f"Total moves: {len(assembly) - 1}")
+        print(f"Execution time: {time.time() - start_time:.2f} seconds")
     scene.show()
 
 test_script()
