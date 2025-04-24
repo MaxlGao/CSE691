@@ -3,6 +3,8 @@ import time
 import copy
 import concurrent.futures
 from tqdm import tqdm
+from pathlib import Path
+import re
 from helper_burr_piece_creator import create_floor, define_all_burr_pieces, FLOOR_INDEX_OFFSET
 from helper_geometric_functions import check_path_clear, get_feasible_motions, get_valid_mates, move_piece, get_unsupported_pids
 from helper_display import compile_gif, show_and_save_frames
@@ -76,7 +78,7 @@ def get_moves_scored_lookahead(pieces, active_pids, target_offsets, mates_list=N
     new_scored_moves = []
     with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = [executor.submit(execute_lookahead_recursive, *args) for args in args_list]
-        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), ncols=100):
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), ncols=100, desc='| | '):
             result = future.result()
             if isinstance(result, list):
                 new_scored_moves.extend(result)
@@ -171,12 +173,30 @@ def get_cost_change(piece, translation, target_offset):
 
 # Top-Level Scripts
 def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=None, folder='results'):
+    # Automatically find all simulation step files
+    sim_folder = Path(folder_sim)
+    step_files = sorted(sim_folder.glob('step_*.pkl'))
+
+    # Extract step indices from filenames
+    step_indices = sorted([
+        int(re.search(r'step_(\d+)\.pkl', f.name).group(1))
+        for f in step_files
+    ])
+
+    latest_step = None
+    if len(step_indices) > 0:
+        latest_step = step_indices[-1]
+        if start_from is None:
+            start_from = latest_step # Pick latest step
+        else:
+            start_from = min(latest_step, start_from) # Try to pick start_from, else latest step
+
     target_offsets = TARGET_OFFSETS
     target_offsets += [0,0,3]
 
-    # Begin assembly set (active pids) with the floor. The floor is a static base piece. 
-    if start_from is None:
-        # Create Floor and Real Pieces
+    # If there are no files available, we must restart (otherwise go with start_from)
+    if latest_step is None:
+        # Create Floor and Real Pieces. The floor is a static base piece. 
         floor = create_floor()
         start_offsets = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
         pieces = define_all_burr_pieces(start_offsets)
@@ -189,21 +209,25 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
         start_from = 0
     else:
         # An awkward setup where a given start_from can be 0, which means to load all data about stage 0, which can contain a lot of scored move data.
-        state = load_simulation_state(start_from)
-        pieces_augmented, active_pids, scored_moves = state
+        print(f"Loading Data from Stage {start_from}...")
+        state = load_simulation_state(start_from, folder=folder)
+        pieces_augmented = state['pieces']
+        pieces = [piece for piece in pieces_augmented if piece['id'] != FLOOR_INDEX_OFFSET ]
+        active_pids = state['assembly']
+        scored_moves = state['available_moves']
         print(f"| Loaded {len(scored_moves)} moves.")
         best_move = scored_moves[0]
         best_costs, ((best_pid, _), (other_pid, _), best_vec) = best_move
         cost_labels = [f"Lookahead {i+1}" for i in range(len(best_costs)-1)] + ["Rollout"]
         score_str = ", ".join(f"{label}: {score:.2f}" for label, score in zip(cost_labels, best_costs))
-        print(f"Score [{score_str}]")
+        print(f"| Score [{score_str}]")
         x, y, z = best_vec
         print(f"| → Best move: Piece {best_pid} → {other_pid}, vec = <{x: .0f},{y: .0f},{z: .0f}>.")
         # Here, it is easiest to just execute the move and start from start_from+1. Most of the heavy lifting comes from calculating moves.
         moved_piece = pieces[best_pid]
         moved_piece = move_piece(moved_piece, best_vec)
         active_pids = active_pids + [best_pid] if best_pid not in active_pids else active_pids
-        print(f"→ Fast-Finished {stage+1} / {n_stages}.")
+        print(f"→ Fast-Finished {start_from+1} / {n_stages}.")
 
         if cost_function(pieces, target_offsets) < 0.1:
             return # If we're at zero cost, we're done.
@@ -224,7 +248,7 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
         best_costs, ((best_pid, _), (other_pid, _), best_vec) = best_move
         cost_labels = [f"Lookahead {i+1}" for i in range(len(best_costs)-1)] + ["Rollout"]
         score_str = ", ".join(f"{label}: {score:.2f}" for label, score in zip(cost_labels, best_costs))
-        print(f"Score [{score_str}]")
+        print(f"| Score [{score_str}]")
         x, y, z = best_vec
         print(f"| → Best move: Piece {best_pid} → {other_pid}, vec = <{x: .0f},{y: .0f},{z: .0f}>.")
         save_simulation_state(stage, pieces_augmented, active_pids, scored_moves, folder=folder)
@@ -241,13 +265,13 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
 
 if __name__=="__main__":
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    folder = f"results/{timestamp}"
-    # folder = f"results/2025-04-23_23-05-42" # Sample folder
+    # folder = f"results/{timestamp}"
+    folder = f"results/2025-04-24_11-24-51" # Existing folder
     folder_sim = f"{folder}/states"
     folder_img = f"{folder}/frames"
 
     start_time = time.time()
-    run_assembler(n_stages=30, top_k=[2, 2, 2], rollout_depth=1, folder=folder_sim)
+    run_assembler(n_stages=30, top_k=[float("inf"), 4, 2, 2, 2, 2, 2], rollout_depth=0, folder=folder_sim)
 
     # Visualize and save frames. Hold=True lets you drag around the scene
     show_and_save_frames(folder_sim, folder_img, TARGET_OFFSETS, hold=False)
