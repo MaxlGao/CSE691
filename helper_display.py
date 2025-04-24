@@ -1,6 +1,8 @@
 import trimesh
 import numpy as np
+import imageio
 import os
+from pathlib import Path
 from helper_burr_piece_creator import create_floor, define_all_burr_pieces
 from helper_burr_piece_creator import REFERENCE_INDEX_OFFSET, FLOOR_INDEX_OFFSET
 
@@ -23,11 +25,11 @@ def render_scene(all_pieces, arrows=None, remake_pieces=True, camera = [14.0, -1
             scene.add_geometry(arrow, node_name=f"arrow_{i}")
     return scene
 
-def show_moves_scored(scored_moves, pieces, floor, opacity=0.6):
-    num_moves = len(scored_moves)
+def show_moves_scored(scored_moves, pieces, floor, opacity=0.6, limit=1000):
+    num_moves = min(len(scored_moves), limit)
     # hue_range = 0.333 * np.flip(np.arange(num_moves)) / num_moves
     arrows = []
-    for i, (score, move) in enumerate(scored_moves):
+    for i, (score, move) in enumerate(scored_moves[:num_moves]):
         # color = colorsys.hsv_to_rgb(hue_range[i], 1, 1)
         color = [0, 0, 0, 1-float(i)/num_moves]
         # color =  + [opacity]
@@ -78,17 +80,25 @@ def get_transform_matrix(position):
     transform[:3, 3] = [x, y, z]     # Position
     return transform
 
-def save_animation_frame(scene, index, out_dir="frames", suffix=''):
-    os.makedirs(out_dir, exist_ok=True)
+def save_animation_frame(scene, index, folder="results", suffix=''):
+    os.makedirs(folder, exist_ok=True)
 
     # Save as image
-    image_path = os.path.join(out_dir, f"frame_{index:03d}{suffix}.png")
+    image_path = os.path.join(folder, f"frame_{index:03d}{suffix}.png")
     png = scene.save_image(resolution=(800, 600), visible=True)
     with open(image_path, 'wb') as f:
         f.write(png)
 
     print(f"Saved frame {index} to {image_path}")
 
+def compile_gif(folder="results", suffix='', gif_name='animation.gif', fps=4):
+    path = Path(folder)
+    frame_files = sorted(path.glob(f"frame_*{suffix}.png"))
+    images = [imageio.imread(str(frame)) for frame in frame_files]
+
+    gif_path = path / gif_name
+    imageio.mimsave(gif_path, images, fps=fps, loop=0)
+    print(f"GIF saved to {gif_path}")
 
 # Show all pieces in a line, then all of them put together.
 def display_pieces():

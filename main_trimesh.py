@@ -4,19 +4,21 @@ import copy
 import concurrent.futures
 from helper_burr_piece_creator import create_floor, define_all_burr_pieces, REFERENCE_INDEX_OFFSET, FLOOR_INDEX_OFFSET
 from helper_geometric_functions import check_path_clear, get_feasible_motions, get_valid_mates, is_supported, move_piece, get_unsupported_pids
-from helper_display import render_scene, show_moves_scored, save_animation_frame, display_pieces
+from helper_display import render_scene, show_moves_scored, save_animation_frame, compile_gif
 from helper_file_mgmt import load_mates_list, load_simulation_state, save_mates_list, save_simulation_state
+from datetime import datetime
 
 # Nomenclature
 # Scored Move = (Scores, Move) 
 #             = (Scores, (Mate[0], Mate[1], Translation)) 
-#             = ([Score 0, Score 1, Rollout Score]], ((pid1, cid1), (pid2, cid2), Translation))
+#             = ([Score 0, Score 1, ..., Rollout Score]], ((pid1, cid1), (pid2, cid2), Translation))
 # Pieces = [Piece, ..., Piece] 
 #        = [{Mesh, Corners, ID}, ..., Piece]
 
 np.set_printoptions(formatter={'int': '{:2d}'.format})
 NULL_MOVE = ((0,0),(0,0),np.array([0,0,0])) # Definition of zero action
 NUM_PIECES = 6
+TARGET_OFFSETS = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
 
 # Dynamic Programming Functions
 def get_top_k_scored_moves(pieces, active_pids, target_offsets, k=float("inf"), mates_list=None, max_held=2):
@@ -169,17 +171,12 @@ def get_cost_change(piece, translation, target_offset):
 
 
 # Top-Level Scripts
-def run_assembler(n_stages=16,top_k=[float("inf"), float("inf")], rollout_depth=3, render=False, show_all_scores=True, start_from=None):
-    target_offsets = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
+def run_assembler(n_stages=16,top_k=[float("inf"), float("inf")], rollout_depth=3, show_all_scores=True, start_from=None, folder='results'):
+    target_offsets = TARGET_OFFSETS
     target_offsets += [0,0,3]
 
     # Begin assembly set (active pids) with the floor. The floor is a static base piece. 
     if start_from is None:
-        # Create Reference Pieces
-        reference_pieces = define_all_burr_pieces(reference=True)
-        for piece in reference_pieces:
-            piece = move_piece(piece, target_offsets[piece['id']-REFERENCE_INDEX_OFFSET])
-        
         # Create Floor and Real Pieces
         floor = create_floor()
         start_offsets = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
@@ -188,15 +185,7 @@ def run_assembler(n_stages=16,top_k=[float("inf"), float("inf")], rollout_depth=
         cost = cost_function(pieces, target_offsets)
         print(f"Initial Cost Measure: {cost:.2f}")
 
-        # Create initial scene
         pieces_augmented = pieces + [floor]
-        all_pieces = reference_pieces + pieces_augmented
-        if render:
-            scene = render_scene(all_pieces)
-            save_animation_frame(scene, 0)
-        else:
-            scene = None
-
         active_pids = [FLOOR_INDEX_OFFSET]
         start_from = 0
     else:
@@ -212,15 +201,12 @@ def run_assembler(n_stages=16,top_k=[float("inf"), float("inf")], rollout_depth=
         # Here, it is easiest to just execute the move and start from start_from+1. Most of the heavy lifting comes from calculating moves.
         moved_piece = pieces[best_pid]
         moved_piece = move_piece(moved_piece, best_vec)
-        if render:
-            scene = render_scene(pieces_augmented)
-            save_animation_frame(scene, start_from+1)
         active_pids = active_pids + [best_pid] if best_pid not in active_pids else active_pids
         print(f"→ Fast-Finished {stage+1} / {n_stages}.")
         print(f"Score [Lookahead 1, Lookahead 2, Rollout]: [{lookahead_1:.2f}, {lookahead_2:.2f}, {rollout:.2f}] long-term.")
 
         if cost_function(pieces, target_offsets) < 0.1:
-            return scene # If we're at zero cost, we're done.
+            return # If we're at zero cost, we're done.
         
         start_from += 1
     
@@ -239,100 +225,49 @@ def run_assembler(n_stages=16,top_k=[float("inf"), float("inf")], rollout_depth=
         lookahead_1, lookahead_2, rollout = best_costs
         x, y, z = best_vec
         print(f"| → Best move: Piece {best_pid} → {other_pid}, vec = <{x: .0f},{y: .0f},{z: .0f}>.")
-        if render:
-            arrows = show_moves_scored(scored_moves, pieces, floor)
-            scene = render_scene(pieces_augmented, arrows=arrows)
-            save_animation_frame(scene, stage, suffix='a')
-        save_simulation_state(stage, pieces_augmented, active_pids, scored_moves)
+        save_simulation_state(stage, pieces_augmented, active_pids, scored_moves, folder=folder)
         
         # Now execute
         moved_piece = pieces[best_pid]
         moved_piece = move_piece(moved_piece, best_vec)
-        if render:
-            scene = render_scene(pieces_augmented)
-            save_animation_frame(scene, stage+1)
         active_pids = active_pids + [best_pid] if best_pid not in active_pids else active_pids
         print(f"→ Done with Stage {stage+1} / {n_stages}. This took {time.time() - start_time:.2f} seconds.")
         print(f"Score [Lookahead 1, Lookahead 2, Rollout]: [{lookahead_1:.2f}, {lookahead_2:.2f}, {rollout:.2f}]")
 
         if cost_function(pieces, target_offsets) < 0.1:
-            return scene # If we're at zero cost, we're done.
-    return scene
-
-# Example script running through mates and checking which ones need support. For verifying support finder only.
-def test_support(): 
-    # Create Floor and Real Pieces
-    floor = create_floor()
-    start_offsets = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
-    pieces = define_all_burr_pieces(start_offsets)
-    
-    # Create initial scene
-    all_pieces = pieces + [floor]
-
-    # Precompute Mates (p1,c1), (p2,c2)
-    mates_list = load_mates_list()
-    if mates_list is None:
-        mates_list = get_valid_mates(pieces, floor)
-        save_mates_list(mates_list)
-
-    supports = []
-    for this_piece in pieces:
-        this_pid = this_piece['id']
-        this_corners = this_piece['corners']
-
-        other_meshes = [piece['mesh'] for piece in all_pieces if piece['id'] != this_pid]
-        other_meshes_not_floor = [piece['mesh'] for piece in pieces if piece['id'] != this_pid]
-        other_corners = []
-        for piece in all_pieces:
-            if piece['id'] == this_piece['id']:
-                continue
-            for cid, pos in piece['corners']:
-                other_corners.append((piece['id'], cid, pos))
-
-        this_mates_list = mates_list[this_pid] # Mates pertaining to this piece
-        # Match corners to actual positions
-        this_corner_dict = {cid: pos for cid, pos in this_corners}
-        other_corner_dict = {(pid, cid): pos for (pid,cid,pos) in other_corners}
-        available_pieces = {p['id'] for p in pieces}
-        combinations = [
-            ((this_pid, cid1), (pid2, cid2), other_corner_dict[(pid2, cid2)] - this_corner_dict[cid1])
-            for ((pid1, cid1), (pid2, cid2)) in this_mates_list
-            if pid2 in available_pieces
-        ]
-
-        for (p1, c1), (p2, c2), vec in combinations:
-            # Quick and dirty check for collision
-            test_piece = copy.deepcopy(this_piece)
-            test_piece = move_piece(test_piece, vec)
-            test_mesh = test_piece['mesh']
-            test_bbox = test_mesh.bounds
-            collide = False
-            for other_mesh in other_meshes:
-                other_bbox = other_mesh.bounds
-                if (all(test_bbox[0] < other_bbox[1]) and # Check for lower test < upper other
-                    all(test_bbox[1] > other_bbox[0])):   # Check for upper test > lower other
-                    collide = True
-            if collide:
-                supports.append(False)
-                continue
-            # Check supports
-            support = is_supported(test_mesh, other_meshes_not_floor) # Including the floor is inefficient
-            supports.append(support)
-            # if support and vec[2] > 0: # Show cases where a piece lays on top of another.
-            #     scene = render_scene(all_pieces + [test_piece])
-            #     scene.show()
-    print(f"There are {supports.count(True)} configurations with support and {supports.count(False)} without.")
+            return # If we're at zero cost, we're done.
     return
 
-
 if __name__=="__main__":
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    # folder = f"results/{timestamp}"
+    folder = f"results/2025-04-23_22-54-56" # Sample folder
+    folder_sim = f"{folder}/states"
+    folder_img = f"{folder}/frames"
+
     start_time = time.time()
-    # scene = display_pieces()
-    # test_support()
-    scene = run_assembler(n_stages=16, top_k=[float("inf"), 20], rollout_depth=100, render=False)
-    # for sc in range(17):
-    #     state = load_simulation_state(sc)
-    #     scene = render_scene(state['pieces'])
-    #     save_animation_frame(scene, sc+1)
-    # print(f"This script took {time.time() - start_time:4f} seconds")
-    # scene.show()
+    # run_assembler(n_stages=16, top_k=[float("inf"), 1], rollout_depth=0, folder=folder_sim)
+
+    # Visualize and save frames
+    # for sc in range(16):
+    #     state = load_simulation_state(sc, folder=folder_sim)
+    #     pieces = state['pieces']
+    #     if sc == 0: # Create Reference Pieces for frame 0
+    #         reference_pieces = define_all_burr_pieces(reference=True)
+    #         target_offsets = TARGET_OFFSETS
+    #         target_offsets += [0,0,3]
+    #         for piece in reference_pieces:
+    #             piece = move_piece(piece, target_offsets[piece['id']-REFERENCE_INDEX_OFFSET])
+    #             pieces.append(piece)
+    #     scene = render_scene(pieces)
+    #     save_animation_frame(scene, sc, folder=folder_img)
+    #     # scene.show() # Uncomment to drag around
+
+    #     floor = create_floor()
+    #     arrows = show_moves_scored(state['available_moves'], state['pieces'], floor)
+    #     scene = render_scene(state['pieces'], arrows=arrows)
+    #     save_animation_frame(scene, sc, folder=folder_img, suffix='a')
+    #     # scene.show() # Uncomment to drag around
+
+    compile_gif(folder=folder_img)
+    print(f"This script took {time.time() - start_time:4f} seconds")

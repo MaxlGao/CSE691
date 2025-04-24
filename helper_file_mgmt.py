@@ -16,17 +16,17 @@ def save_mates_list(mates_list, filename='cache/mates_list.pkl'):
         pickle.dump(mates_list, f)
         print(f"Saved mates_list to {filename}")
 
-def save_simulation_state(step_id, pieces, active_pids, all_scored_moves, metadata=None, folder='logs', suffix=''):
+def save_simulation_state(step_id, pieces, active_pids, all_scored_moves, metadata=None, folder='results', suffix=''):
     os.makedirs(folder, exist_ok=True)
     data = {
         'pieces': pieces,
         'assembly': active_pids,
-        'available_moves': all_scored_moves,
+        'available_moves': all_scored_moves, # All scored moves going FROM the pieces here
         'metadata': metadata or {}
     }
     with open(f'{folder}/step_{step_id:03d}{suffix}.pkl', 'wb') as f:
         pickle.dump(data, f)
 
-def load_simulation_state(step_id, folder='logs'):
+def load_simulation_state(step_id, folder='results'):
     with open(f'{folder}/step_{step_id:03d}.pkl', 'rb') as f:
         return pickle.load(f)

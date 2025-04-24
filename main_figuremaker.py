@@ -5,7 +5,7 @@ from helper_geometric_functions import check_path_clear, get_feasible_motions, g
 from helper_display import render_scene, show_moves_scored, save_animation_frame, display_pieces
 from helper_file_mgmt import load_mates_list, load_simulation_state, save_mates_list, save_simulation_state
 from main_trimesh import get_top_k_scored_moves
-
+import copy
 
 
 # Scripts for making figures
@@ -78,7 +78,70 @@ def display_connections(camera = [-15.0, -24.0, 15.0, 0.0]):
 
     return scene
   
+# Example script running through mates and checking which ones need support. For verifying support finder only.
+def test_support(): 
+    # Create Floor and Real Pieces
+    floor = create_floor()
+    start_offsets = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
+    pieces = define_all_burr_pieces(start_offsets)
     
+    # Create initial scene
+    all_pieces = pieces + [floor]
+
+    # Precompute Mates (p1,c1), (p2,c2)
+    mates_list = load_mates_list()
+    if mates_list is None:
+        mates_list = get_valid_mates(pieces, floor)
+        save_mates_list(mates_list)
+
+    supports = []
+    for this_piece in pieces:
+        this_pid = this_piece['id']
+        this_corners = this_piece['corners']
+
+        other_meshes = [piece['mesh'] for piece in all_pieces if piece['id'] != this_pid]
+        other_meshes_not_floor = [piece['mesh'] for piece in pieces if piece['id'] != this_pid]
+        other_corners = []
+        for piece in all_pieces:
+            if piece['id'] == this_piece['id']:
+                continue
+            for cid, pos in piece['corners']:
+                other_corners.append((piece['id'], cid, pos))
+
+        this_mates_list = mates_list[this_pid] # Mates pertaining to this piece
+        # Match corners to actual positions
+        this_corner_dict = {cid: pos for cid, pos in this_corners}
+        other_corner_dict = {(pid, cid): pos for (pid,cid,pos) in other_corners}
+        available_pieces = {p['id'] for p in pieces}
+        combinations = [
+            ((this_pid, cid1), (pid2, cid2), other_corner_dict[(pid2, cid2)] - this_corner_dict[cid1])
+            for ((pid1, cid1), (pid2, cid2)) in this_mates_list
+            if pid2 in available_pieces
+        ]
+
+        for (p1, c1), (p2, c2), vec in combinations:
+            # Quick and dirty check for collision
+            test_piece = copy.deepcopy(this_piece)
+            test_piece = move_piece(test_piece, vec)
+            test_mesh = test_piece['mesh']
+            test_bbox = test_mesh.bounds
+            collide = False
+            for other_mesh in other_meshes:
+                other_bbox = other_mesh.bounds
+                if (all(test_bbox[0] < other_bbox[1]) and # Check for lower test < upper other
+                    all(test_bbox[1] > other_bbox[0])):   # Check for upper test > lower other
+                    collide = True
+            if collide:
+                supports.append(False)
+                continue
+            # Check supports
+            support = is_supported(test_mesh, other_meshes_not_floor) # Including the floor is inefficient
+            supports.append(support)
+            # if support and vec[2] > 0: # Show cases where a piece lays on top of another.
+            #     scene = render_scene(all_pieces + [test_piece])
+            #     scene.show()
+    print(f"There are {supports.count(True)} configurations with support and {supports.count(False)} without.")
+    return
 
 if __name__=="__main__":
     start_time = time.time()

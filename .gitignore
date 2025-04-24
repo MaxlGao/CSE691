@@ -2,5 +2,6 @@
 *.pdf
 HW/*
 Burr Model/*
+results/*
 temp/*
 *.pptx
