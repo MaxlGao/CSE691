@@ -781,8 +781,10 @@ def test_support():
     print(f"There are {supports.count(True)} configurations with support and {supports.count(False)} without.")
     return
 
+
+# Scripts for making figures
 # Place two pieces and draw arrows between all feasible mates
-def display_connections():
+def display_connections(camera = [-15.0, -24.0, 15.0, 0.0]):
     target_offsets = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
     target_offsets += [0,0,3]
 
@@ -797,8 +799,8 @@ def display_connections():
     pieces = define_all_burr_pieces(start_offsets)
     
     # Move Piece 3 to its correct location
-    # pieces[3] = move_piece(pieces[3], target_offsets[3] - start_offsets[3])
-    # pieces[5] = move_piece(pieces[5], [0, -16, 0])
+    pieces[3] = move_piece(pieces[3], target_offsets[3] - start_offsets[3])
+    pieces[5] = move_piece(pieces[5], [0, -16, 0])
 
     # Create initial scene
     pieces_augmented = pieces + [floor]
@@ -812,27 +814,68 @@ def display_connections():
         save_mates_list(mates_list)
 
     # Do a mock assembly looking through all immediately available moves 
-    active_pids = [FLOOR_INDEX_OFFSET]
+    active_pids = [FLOOR_INDEX_OFFSET, 3]
     scored_moves = get_top_k_scored_moves(pieces_augmented, active_pids, target_offsets, mates_list=mates_list)
     # print(f"| Processed {len(scored_moves)} moves.")
 
     # Filter to only look at piece 5
-    # scored_moves = [scored_move for scored_move in scored_moves if scored_move[1][0][0] == 5]
-    # print(f"| Filtered to {len(scored_moves)} moves.")
+    scored_moves = [scored_move for scored_move in scored_moves if scored_move[1][0][0] == 5]
+    print(f"| Filtered to {len(scored_moves)} moves.")
 
     arrows = show_moves_scored(scored_moves, pieces, floor)
     # Filter arrows list to be every 4th arrow
     # arrows = [arrow for i, arrow in enumerate(arrows) if np.mod(i, 4) == 0]
-    # print(f"| Filtered to {len(arrows)} moves.")
+    print(f"| Filtered to {len(arrows)} moves.")
 
-    # scene_pieces = [reference_pieces[3], reference_pieces[5], pieces[3], pieces[5], floor]
-    scene = render_scene(pieces_augmented, arrows=arrows)
+    scene_pieces = [reference_pieces[3], reference_pieces[5], pieces[3], pieces[5], floor]
+    scene = render_scene(scene_pieces, arrows=arrows, camera=camera)
+    save_animation_frame(scene, 100, suffix='b')
+
+    # Now display the motion of the top move
+    best_move = scored_moves[0]
+    _, ((_,_),(_,_),vec) = best_move
+    steps=20
+    this_mesh = pieces[5]['mesh']
+    scene = render_scene(scene_pieces, arrows=[arrows[0]], camera=camera)
+    for step in range(1, steps + 1):
+        frac_translation = (vec * step) / (steps)
+        test_mesh = this_mesh.copy()
+        test_mesh.apply_translation(frac_translation)
+        test_mesh.visual.face_colors = [255, 0, 255, 20]
+        scene.add_geometry(test_mesh, f"interstitial_{step}")
+    save_animation_frame(scene, 101, suffix='b')
+
+    # Lastly, display the final state
+    pieces[5] = move_piece(pieces[5], vec)
+    scene = render_scene(scene_pieces, camera=camera)
+    save_animation_frame(scene, 102, suffix='b')
+
     return scene
+
+# Show all pieces in a line, then all of them put together.
+def display_pieces():
+    target_offsets = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
+    target_offsets += [0,0,3]
+
+    # Image 1: Pieces put together
+    pieces = define_all_burr_pieces(target_offsets)
+    floor = create_floor()
+    scene = render_scene(pieces + [floor])
+    save_animation_frame(scene, 200, suffix='b')
+
+    # # Image 2: Pieces in a line
+    # start_offsets = np.array([[-10,-6,1],[-5,-6,1],[-2,-6,1],[2,6,3],[5,6,3],[10,6,1]])
+    # # target_offsets += [0,-4,0]
+    # pieces = define_all_burr_pieces(start_offsets)
+    # scene = render_scene(pieces + [floor], camera=[15.0, -24.0, 15.0, 0.0])
+    # save_animation_frame(scene, 201, suffix='b')
+    
+    
 
 if __name__=="__main__":
     start_time = time.time()
-    # scene = display_connections()
-    scene = run_assembler(n_stages=30, top_k=[float("inf"), 1], rollout_depth=100, render=True)
+    scene = display_pieces()
+    # scene = run_assembler(n_stages=30, top_k=[float("inf"), 1], rollout_depth=100, render=True)
     # for sc in range(17):
     #     state = load_simulation_state(sc)
     #     scene = render_scene(state['pieces'])
