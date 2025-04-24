@@ -3,8 +3,11 @@ import numpy as np
 import imageio
 import os
 from pathlib import Path
+import re
 from helper_burr_piece_creator import create_floor, define_all_burr_pieces
 from helper_burr_piece_creator import REFERENCE_INDEX_OFFSET, FLOOR_INDEX_OFFSET
+from helper_file_mgmt import load_simulation_state
+from helper_geometric_functions import move_piece
 
 # Rendering Scripts
 def render_scene(all_pieces, arrows=None, remake_pieces=True, camera = [14.0, -16.0, 20.0, 0.0]):
@@ -90,6 +93,42 @@ def save_animation_frame(scene, index, folder="results", suffix=''):
         f.write(png)
 
     print(f"Saved frame {index} to {image_path}")
+
+def show_and_save_frames(folder_sim, folder_img, target_offsets, hold=False):
+    # Automatically find all simulation step files
+    sim_folder = Path(folder_sim)
+    step_files = sorted(sim_folder.glob('step_*.pkl'))
+
+    # Extract step indices from filenames
+    step_indices = sorted([
+        int(re.search(r'step_(\d+)\.pkl', f.name).group(1))
+        for f in step_files
+    ])
+
+    reference_pieces = None
+
+    for sc in step_indices:
+        state = load_simulation_state(sc, folder=folder_sim)
+        pieces = state['pieces']
+
+        if reference_pieces is None:  # On first step only
+            reference_pieces = define_all_burr_pieces(reference=True)
+            target_offsets = target_offsets + [0, 0, 3]
+            for piece in reference_pieces:
+                piece = move_piece(piece, target_offsets[piece['id'] - REFERENCE_INDEX_OFFSET])
+                pieces.append(piece)
+
+        scene = render_scene(pieces)
+        save_animation_frame(scene, sc, folder=folder_img)
+        if hold:
+            scene.show()
+
+        floor = create_floor()
+        arrows = show_moves_scored(state['available_moves'], state['pieces'], floor)
+        scene = render_scene(state['pieces'], arrows=arrows)
+        save_animation_frame(scene, sc, folder=folder_img, suffix='a')
+        if hold:
+            scene.show()
 
 def compile_gif(folder="results", suffix='', gif_name='animation.gif', fps=4):
     path = Path(folder)
