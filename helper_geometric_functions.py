@@ -158,15 +158,32 @@ def get_valid_mates(pieces, floor):
 
 def get_unsupported_pids(assembly_pieces):
     """
-    Returns a list of pids which are unsupported
+    Recursively determine which pieces are unsupported based on actual supported ancestry.
+    A piece is only supported if it's on the floor or supported by another supported piece.
     """
-    # Combine all support surfaces
-    unsupported = []
+    supported_ids = set()
+    remaining_ids = {p['id'] for p in assembly_pieces}
+    id_to_piece = {p['id']: p for p in assembly_pieces}
+
+    # Step 1: Add pieces directly supported by the floor
     for piece in assembly_pieces:
-        support_meshes = [p['mesh'] for p in assembly_pieces if p['id'] != piece['id']]
-        if not is_supported(piece['mesh'], support_meshes):
-            unsupported.append(piece['id'])
-    return unsupported
+        if piece['mesh'].bounds[0][2] == 0:  # on the floor
+            supported_ids.add(piece['id'])
+
+    # Step 2: Propagate support
+    changed = True
+    while changed:
+        changed = False
+        for pid in remaining_ids - supported_ids:
+            piece = id_to_piece[pid]
+            potential_supporters = [id_to_piece[sid] for sid in supported_ids if sid != pid]
+            support_meshes = [p['mesh'] for p in potential_supporters]
+            if is_supported(piece['mesh'], support_meshes):
+                supported_ids.add(pid)
+                changed = True
+
+    # Step 3: Unsupported pieces are those not marked as supported
+    return list(remaining_ids - supported_ids)
 
 def is_supported(this_mesh, other_meshes):
     # Quick check to see if this mesh is on the floor

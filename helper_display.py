@@ -94,7 +94,7 @@ def save_animation_frame(scene, index, folder="results", suffix=''):
 
     print(f"Saved frame {index} to {image_path}")
 
-def show_and_save_frames(folder_sim, folder_img, target_offsets, hold=False):
+def show_and_save_frames(folder_sim, folder_img, target_offsets, hold=False, start_from=0):
     # Automatically find all simulation step files
     sim_folder = Path(folder_sim)
     step_files = sorted(sim_folder.glob('step_*.pkl'))
@@ -108,10 +108,12 @@ def show_and_save_frames(folder_sim, folder_img, target_offsets, hold=False):
     reference_pieces = None
 
     for sc in step_indices:
+        if sc < start_from:
+            continue
         state = load_simulation_state(sc, folder=folder_sim)
         pieces = state['pieces']
 
-        if reference_pieces is None:  # On first step only
+        if sc == 0:  # On first step only
             reference_pieces = define_all_burr_pieces(reference=True)
             target_offsets = target_offsets + [0, 0, 3]
             for piece in reference_pieces:
@@ -134,6 +136,9 @@ def compile_gif(folder="results", suffix='', gif_name='animation.gif', fps=4):
     path = Path(folder)
     frame_files = sorted(path.glob(f"frame_*{suffix}.png"))
     images = [imageio.imread(str(frame)) for frame in frame_files]
+    # Hold last image for a bit
+    for i in range(fps):
+        images.append(images[-1])
 
     gif_path = path / gif_name
     imageio.mimsave(gif_path, images, fps=fps, loop=0)

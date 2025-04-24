@@ -76,17 +76,17 @@ def get_moves_scored_lookahead(pieces, active_pids, target_offsets, mates_list=N
         for scored_move in top_scored_moves
     ]
     new_scored_moves = []
+    total_moves_compared = 0
     with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = [executor.submit(execute_lookahead_recursive, *args) for args in args_list]
-        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), ncols=100, desc='| | '):
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), ncols=100, desc='| '):
             result = future.result()
-            if isinstance(result, list):
-                new_scored_moves.extend(result)
-            else:
-                new_scored_moves.append(result)
+            scored_move, num_moves = result
+            new_scored_moves.append(scored_move)
+            total_moves_compared += num_moves
 
     new_scored_moves.sort(key=lambda x: sum(x[0]))
-    return new_scored_moves
+    return new_scored_moves, total_moves_compared
 
 def execute_lookahead_recursive(scored_move, pieces, active_pids, target_offsets, mates_list, rollout_depth, top_k_remaining):
     primary_cost, ((pid1, cid1), (pid2, cid2), vec) = scored_move
@@ -101,20 +101,22 @@ def execute_lookahead_recursive(scored_move, pieces, active_pids, target_offsets
     if not top_k_remaining:
         future_cost = greedy_rollout_score(temp_pieces, temp_active_pids, target_offsets, mates_list, depth=rollout_depth)
         total_scores = [primary_cost] + [future_cost]
-        return (total_scores, ((pid1, cid1), (pid2, cid2), vec))
+        return (total_scores, ((pid1, cid1), (pid2, cid2), vec)), 1
 
     next_k = top_k_remaining[0]
     next_moves = get_top_k_scored_moves(temp_pieces, temp_active_pids, target_offsets, k=next_k, mates_list=mates_list)
     
     child_scores = []
+    num_children = 0
     for move in next_moves:
-        child_result = execute_lookahead_recursive(move, temp_pieces, temp_active_pids, target_offsets, mates_list, rollout_depth, top_k_remaining[1:])
+        child_result, num_child = execute_lookahead_recursive(move, temp_pieces, temp_active_pids, target_offsets, mates_list, rollout_depth, top_k_remaining[1:])
+        num_children += num_child
         child_scores.append(child_result)
 
     # Choose best child
     best_child = sorted(child_scores, key=lambda x: sum(x[0]))[0]
     total_scores = [primary_cost] + best_child[0]
-    return (total_scores, ((pid1, cid1), (pid2, cid2), vec))
+    return (total_scores, ((pid1, cid1), (pid2, cid2), vec)), num_children
 
 def execute_greedy(args):
     move, pieces, active_pids, target_offsets, mates_list, depth = args
@@ -242,8 +244,8 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
 
     for stage in range(start_from, n_stages):
         start_time = time.time()
-        scored_moves = get_moves_scored_lookahead(pieces_augmented, active_pids, target_offsets, mates_list, top_k=top_k, rollout_depth=rollout_depth)
-        print(f"| | Processed {len(scored_moves)} moves.")
+        scored_moves, moves_compared = get_moves_scored_lookahead(pieces_augmented, active_pids, target_offsets, mates_list, top_k=top_k, rollout_depth=rollout_depth)
+        print(f"| | Processed {moves_compared} moves.")
         best_move = scored_moves[0]
         best_costs, ((best_pid, _), (other_pid, _), best_vec) = best_move
         cost_labels = [f"Lookahead {i+1}" for i in range(len(best_costs)-1)] + ["Rollout"]
@@ -265,16 +267,17 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
 
 if __name__=="__main__":
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    # folder = f"results/{timestamp}"
-    folder = f"results/2025-04-24_11-24-51" # Existing folder
+    folder = f"results/{timestamp}"
+    # folder = f"results/2025-04-24_12-45-55" # Existing folder
     folder_sim = f"{folder}/states"
     folder_img = f"{folder}/frames"
 
     start_time = time.time()
-    run_assembler(n_stages=30, top_k=[float("inf"), 4, 2, 2, 2, 2, 2], rollout_depth=0, folder=folder_sim)
+    run_assembler(n_stages=30, top_k=[float("inf"), float("inf"), 2, 2, 2, 2, 2, 2], rollout_depth=0, folder=folder_sim)
+    # run_assembler(n_stages=30, top_k=[float("inf"), float("inf")], rollout_depth=0, folder=folder_sim)
 
     # Visualize and save frames. Hold=True lets you drag around the scene
-    show_and_save_frames(folder_sim, folder_img, TARGET_OFFSETS, hold=False)
+    show_and_save_frames(folder_sim, folder_img, TARGET_OFFSETS, hold=False, start_from=0)
 
     compile_gif(folder=folder_img)
     print(f"This script took {time.time() - start_time:4f} seconds")
