@@ -144,20 +144,8 @@ def compile_gif(folder="results", suffix='', gif_name='animation.gif', fps=4):
     imageio.mimsave(gif_path, images, fps=fps, loop=0)
     print(f"GIF saved to {gif_path}")
 
-# Show all pieces in a line, then all of them put together.
-def display_pieces():
-    target_offsets = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
-    target_offsets += [0,0,3]
-
-    # Image 1: Pieces put together
-    pieces = define_all_burr_pieces(target_offsets)
+def display_pieces(index, offsets=np.array([[0,0,4],[-1,0,3],[1,0,3],[0,1,3],[0,-1,3],[0,0,2]]), suffix='b', folder="results"):
+    pieces = define_all_burr_pieces(offsets)
     floor = create_floor()
     scene = render_scene(pieces + [floor])
-    save_animation_frame(scene, 200, suffix='b')
-
-    # # Image 2: Pieces in a line
-    # start_offsets = np.array([[-10,-6,1],[-5,-6,1],[-2,-6,1],[2,6,3],[5,6,3],[10,6,1]])
-    # # target_offsets += [0,-4,0]
-    # pieces = define_all_burr_pieces(start_offsets)
-    # scene = render_scene(pieces + [floor], camera=[15.0, -24.0, 15.0, 0.0])
-    # save_animation_frame(scene, 201, suffix='b')
+    save_animation_frame(scene, index, suffix=suffix, folder=folder)

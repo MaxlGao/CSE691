@@ -12,7 +12,7 @@ UNINTERESTING_CORNERS = { # Uses Corner IDs according to find_cube_corners
     5: {1, 6, 12, 17},
     # piece 0: none
 }
-
+START_OFFSETS_CORNERS = np.array([[1,-9,0],[-9,-3,0],[7,-3,0],[-5,7,0],[-5,-9,0],[1,7,0]])
 # Creation Functions
 def find_cube_corners(mesh, tol=1e-6):
     """
@@ -58,7 +58,7 @@ def find_cube_corners(mesh, tol=1e-6):
     
     return corners
 
-def create_floor():
+def create_floor(reverse=False):
     """
     Create a Floor. Returns a dict like create_burr_piece
     """
@@ -66,10 +66,13 @@ def create_floor():
     floor.apply_translation([0, 0, -0.5])
     floor.visual.face_colors = [200, 200, 200, 255]
 
-    # Only points on the floor where piece 3 and 4's corners touch
-    corners = [(0,[-1,0,0]), (1,[1,0,0]),
-               (2,[-1,2,0]), (3,[1,2,0]),
-               (4,[-1,-2,0]), (5,[1,-2,0])] 
+    if reverse:
+        corners = [(i, pos) for i, pos in enumerate(START_OFFSETS_CORNERS)] 
+    else:
+        # Only points on the floor where piece 3 and 4's corners touch
+        corners = [(0,[-1,0,0]), (1,[1,0,0]),
+                   (2,[-1,2,0]), (3,[1,2,0]),
+                   (4,[-1,-2,0]), (5,[1,-2,0])] 
     return {'mesh': floor, 'corners': corners, 'id': FLOOR_INDEX_OFFSET}
 
 def create_burr_piece(blocks, color, idx, reference=False):
