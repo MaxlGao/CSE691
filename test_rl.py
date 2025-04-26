@@ -11,7 +11,7 @@ from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
 NUM_PIECES = 6
-TARGET_OFFSETS = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
+TARGET_OFFSETS = np.array([[0,0,4],[-1,0,3],[1,0,3],[0,1,3],[0,-1,3],[0,0,2]])
 START_OFFSETS = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
 
 class BurrPuzzleEnv(gym.Env):
@@ -33,7 +33,7 @@ class BurrPuzzleEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.floor = create_floor()
-        self.pieces = define_all_burr_pieces(START_OFFSETS)
+        self.pieces = define_all_burr_pieces(TARGET_OFFSETS)
         self.pieces_augmented = self.pieces + [self.floor]
         self.active_pids = [FLOOR_INDEX_OFFSET]
         self.timestep = 0
@@ -41,19 +41,20 @@ class BurrPuzzleEnv(gym.Env):
         return (obs, {})
 
     def step(self, action):
-        prev_cost = cost_function(self.pieces, TARGET_OFFSETS)
+        prev_cost = cost_function(self.pieces, START_OFFSETS)
         mate = self.mates_list[action]
         self.pieces_augmented = apply_mate(self.pieces_augmented, mate)
         moved_id = mate[0][0]
         if moved_id not in self.active_pids:
             self.active_pids.append(moved_id)
 
-        new_cost = cost_function(self.pieces, TARGET_OFFSETS)  # Or delta in cost
+        new_cost = cost_function(self.pieces, START_OFFSETS)
         reward = prev_cost - new_cost
         reward -= 0.01 # per time step
         if new_cost < 0.1:
             reward += 100 # Completion reward
-        print(f"Received Reward {reward:.2f} at timestep {self.timestep}")
+        if np.mod(self.timestep, 10) == 0:
+            print(f"Received Reward {reward:.2f} at timestep {self.timestep}")
         self.timestep += 1
         done = (new_cost < 0.1) or self.timestep > 100
         obs = self._get_obs()
@@ -108,7 +109,7 @@ def env_train(folder):
         env = ActionMasker(env, mask_fn)
         return env
     # env = make_env()
-    vec_env = SubprocVecEnv([make_env for _ in range(12)])
+    vec_env = SubprocVecEnv([make_env for _ in range(24)])
     model = MaskablePPO('MultiInputPolicy', vec_env, verbose=1,tensorboard_log="./ppo_burr_tensorboard/")
     model.learn(total_timesteps=1000)
     model.save("puzzle_agent")
@@ -143,6 +144,6 @@ if __name__=="__main__":
     # folder = f"results/2025-04-24_12-45-55" # Existing folder
     folder_sim = f"{folder}/states"
     folder_img = f"{folder}/frames"
-    # model = env_train(folder_sim)
+    model = env_train(folder_sim)
     model = MaskablePPO.load("puzzle_agent")
     env_test(model, folder_sim)

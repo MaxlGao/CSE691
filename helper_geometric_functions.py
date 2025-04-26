@@ -203,9 +203,8 @@ def is_supported(this_mesh, other_meshes):
     if len(intersects) > 0:
         try:
             intersection = trimesh.boolean.union(intersects)
-        except:
+        except: # debug
             scene = trimesh.Scene()
-            # scene.camera_transform = get_transform_matrix([14.0, -16.0, 20.0, 0.0])
             scene.add_geometry(intersects[0], node_name=f"intersect")
             scene.show()
         intersection_cvhull = intersection.convex_hull
@@ -215,9 +214,8 @@ def is_supported(this_mesh, other_meshes):
     CoM_xy = this_mesh.center_mass[0:2] # only interested in x/y coordinate, if Z is down
     hull_points_xy = intersection_cvhull.vertices[:, :2]
     polygon = Polygon(hull_points_xy).convex_hull
-    # if polygon.contains(Point(CoM_xy)):
+    # if polygon.contains(Point(CoM_xy)): # Debug verification
     #     scene = trimesh.Scene()
-    #     scene.camera_transform = get_transform_matrix([14.0, -16.0, 20.0, 0.0])
     #     scene.add_geometry(intersection_cvhull, node_name=f"intersect")
     #     scene.show()
     return polygon.contains(Point(CoM_xy)) # If contains, return True
@@ -225,6 +223,10 @@ def is_supported(this_mesh, other_meshes):
 def move_piece(piece, translation):
     piece['mesh'].apply_translation(translation)
     piece['corners'] = [(cid, pos+translation) for cid,pos in piece['corners']]
+    if piece['gripper_config'] is not None:
+        piece['gripper_config'] = [piece['gripper_config'][0],
+                                piece['gripper_config'][1] + translation, 
+                                piece['gripper_config'][2]]
     return piece
 
 # Alt form of move_piece

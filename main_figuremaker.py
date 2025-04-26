@@ -4,7 +4,7 @@ from helper_burr_piece_creator import create_floor, define_all_burr_pieces, REFE
 from helper_geometric_functions import check_path_clear, get_feasible_motions, get_valid_mates, is_supported, move_piece
 from helper_display import render_scene, show_moves_scored, save_animation_frame, display_pieces
 from helper_file_mgmt import load_mates_list, load_simulation_state, save_mates_list, save_simulation_state
-from main_trimesh import get_top_k_scored_moves
+from main_trimesh import get_top_k_scored_moves, START_OFFSETS
 import copy
 
 
@@ -145,6 +145,6 @@ def test_support():
 
 if __name__=="__main__":
     start_time = time.time()
-    # scene = display_pieces()
-    scene = display_connections()
+    scene = display_pieces(offsets=START_OFFSETS)
+    # scene = display_connections()
     scene.show()

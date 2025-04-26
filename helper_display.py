@@ -4,13 +4,13 @@ import imageio
 import os
 from pathlib import Path
 import re
-from helper_burr_piece_creator import create_floor, define_all_burr_pieces
+from helper_burr_piece_creator import create_floor, define_all_burr_pieces, create_gripper
 from helper_burr_piece_creator import REFERENCE_INDEX_OFFSET, FLOOR_INDEX_OFFSET
 from helper_file_mgmt import load_simulation_state
-from helper_geometric_functions import move_piece
+from helper_geometric_functions import move_piece, is_supported
 
 # Rendering Scripts
-def render_scene(all_pieces, arrows=None, remake_pieces=True, camera = [14.0, -16.0, 20.0, 0.0]):
+def render_scene(all_pieces, arrows=None, grippers=[], camera = [14.0, -16.0, 20.0, 0.0]):
     scene = trimesh.Scene()
     scene.camera_transform = get_transform_matrix(camera)
     for piece in all_pieces:
@@ -18,6 +18,9 @@ def render_scene(all_pieces, arrows=None, remake_pieces=True, camera = [14.0, -1
         scene.add_geometry(piece['mesh'], node_name=f"piece_{pid}")
         if pid == FLOOR_INDEX_OFFSET or pid < REFERENCE_INDEX_OFFSET:
             show_corners(scene, piece)
+    for i, gripper in enumerate(grippers):
+        if gripper is not None:
+            scene.add_geometry(gripper, node_name=f"gripper_{i}")
     if arrows:
         # Remove old arrows
         arrow_nodes = [name for name in scene.graph.nodes_geometry if name.startswith('arrow_')]
@@ -106,7 +109,7 @@ def save_animation_frame(scene, index, folder="results", suffix=''):
         img_pil.save(image_path)
         print(f"Error rendering frame {index}, saved placeholder to {image_path}")
 
-def show_and_save_frames(folder_sim, folder_img, target_offsets, hold=False, start_from=0):
+def show_and_save_frames(folder_sim, folder_img, target_offsets, hold=False, start_from=0, reverse=False):
     # Automatically find all simulation step files
     sim_folder = Path(folder_sim)
     step_files = sorted(sim_folder.glob('step_*.pkl'))
@@ -132,32 +135,42 @@ def show_and_save_frames(folder_sim, folder_img, target_offsets, hold=False, sta
                 piece = move_piece(piece, target_offsets[piece['id'] - REFERENCE_INDEX_OFFSET])
                 pieces.append(piece)
 
-        scene = render_scene(pieces)
+        grippers = []
+        for piece in pieces:
+            grippers.append(create_gripper(config=piece['gripper_config']))
+        scene = render_scene(pieces, grippers=grippers)
         save_animation_frame(scene, sc, folder=folder_img)
         if hold:
             scene.show()
 
-        floor = create_floor()
+        floor = create_floor(reverse=reverse)
         arrows = show_moves_scored(state['available_moves'], state['pieces'], floor)
-        scene = render_scene(state['pieces'], arrows=arrows)
+        scene = render_scene(state['pieces'], arrows=arrows, grippers=grippers)
         save_animation_frame(scene, sc, folder=folder_img, suffix='a')
         if hold:
             scene.show()
 
-def compile_gif(folder="results", suffix='', gif_name='animation.gif', fps=4):
+def compile_gif(folder="results", suffix='', gif_name='animation.gif', fps=4, reverse=False):
     path = Path(folder)
-    frame_files = sorted(path.glob(f"frame_*{suffix}.png"))
+    frame_files = sorted(path.glob(f"frame_*{suffix}.png"), reverse=reverse)
     images = [imageio.imread(str(frame)) for frame in frame_files]
     # Hold last image for a bit
     for i in range(fps):
         images.append(images[-1])
-
+    if reverse:
+        gif_name = "reversed_"+gif_name
     gif_path = path / gif_name
     imageio.mimsave(gif_path, images, fps=fps, loop=0)
     print(f"GIF saved to {gif_path}")
 
-def display_pieces(index, offsets=np.array([[0,0,4],[-1,0,3],[1,0,3],[0,1,3],[0,-1,3],[0,0,2]]), suffix='b', folder="results"):
+def display_pieces(index=None, offsets=np.array([[0,0,4],[-1,0,3],[1,0,3],[0,1,3],[0,-1,3],[0,0,2]]), suffix='b', folder="results"):
     pieces = define_all_burr_pieces(offsets)
     floor = create_floor()
-    scene = render_scene(pieces + [floor])
-    save_animation_frame(scene, index, suffix=suffix, folder=folder)
+    grippers = []
+    for piece in pieces:
+        grippers.append(create_gripper(config=piece['gripper_config']))
+    scene = render_scene(pieces + [floor], grippers=grippers)
+    if index:
+        save_animation_frame(scene, index, suffix=suffix, folder=folder)
+
+    return scene

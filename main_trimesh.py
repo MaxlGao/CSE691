@@ -18,6 +18,7 @@ from datetime import datetime
 #             = ([Score 0, Score 1, ..., Rollout Score]], ((pid1, cid1), (pid2, cid2), Translation))
 # Pieces = [Piece, ..., Piece] 
 #        = [{Mesh, Corners, ID}, ..., Piece]
+#        = [{Mesh, (ID, World Position), ID}, ..., Piece]
 
 np.set_printoptions(formatter={'int': '{:2d}'.format})
 NUM_PIECES = 6
@@ -46,8 +47,15 @@ def get_top_k_scored_moves(pieces, active_pids, target_offsets, k=float("inf"), 
 
     # Then sort by score. 
     unverified_scored_moves = []
+    has_null_move = False
     for (pid1, cid1), (pid2, cid2), vec in unverified:
+        if np.linalg.norm(vec) <= 0.01:
+            if has_null_move:
+                continue # Don't collect more than one null move
+            else:
+                has_null_move = True
         cost_change = get_cost_change(pieces[pid1], vec, target_offsets[pid1])
+        cost_change += 0.001 # Constant cost to encourage fewer moves (and break ties)
         unverified_scored_moves.append((cost_change, ((pid1, cid1), (pid2, cid2), vec)))
     unverified_scored_moves.sort(key=lambda x: x[0])
 
@@ -89,7 +97,9 @@ def get_moves_scored_lookahead(pieces, active_pids, target_offsets, mates_list=N
             new_scored_moves.append(scored_move)
             total_moves_compared += num_moves
 
-    new_scored_moves.sort(key=lambda x: sum(x[0]))
+    # Break ties by picking the best immediate move
+    new_scored_moves.sort(key=lambda x: x[0][0]) 
+    new_scored_moves.sort(key=lambda x: np.trunc(sum(x[0])*1e7))
     return new_scored_moves, total_moves_compared
 
 def execute_lookahead_recursive(scored_move, pieces, active_pids, target_offsets, mates_list, rollout_depth, top_k_remaining):
@@ -104,7 +114,8 @@ def execute_lookahead_recursive(scored_move, pieces, active_pids, target_offsets
     # Recurse or Rollout
     if not top_k_remaining:
         future_cost = greedy_rollout_score(temp_pieces, temp_active_pids, target_offsets, mates_list, depth=rollout_depth)
-        total_scores = [primary_cost] + [future_cost]
+        future_cost_r = np.round(future_cost, 9)
+        total_scores = [primary_cost] + [future_cost_r]
         return (total_scores, ((pid1, cid1), (pid2, cid2), vec)), 1
 
     next_k = top_k_remaining[0]
@@ -118,22 +129,13 @@ def execute_lookahead_recursive(scored_move, pieces, active_pids, target_offsets
         child_scores.append(child_result)
 
     # Choose best child
-    best_child = sorted(child_scores, key=lambda x: sum(x[0]))[0]
+    # Break ties by picking the best immediate move
+    presorted_child_scores = sorted(child_scores, key=lambda x: x[0][0]) 
+    postsorted_child_scores = sorted(presorted_child_scores, key=lambda x: np.trunc(sum(x[0])*1e7))
+    # sums = [np.trunc(sum(nsm[0])*1e7)/1e7 for nsm in postsorted_child_scores]
+    best_child = postsorted_child_scores[0]
     total_scores = [primary_cost] + best_child[0]
     return (total_scores, ((pid1, cid1), (pid2, cid2), vec)), num_children
-
-def execute_greedy(args):
-    move, pieces, active_pids, target_offsets, mates_list, depth = args
-    primary_cost, ((pid1, cid1), (pid2, cid2), vec) = move
-
-    temp_piece = move_piece(copy.deepcopy(pieces[pid1]), vec)
-    temp_pieces = copy.deepcopy(pieces)
-    temp_pieces[pid1] = temp_piece
-    temp_active_pids = active_pids + [temp_piece['id']] if temp_piece['id'] not in active_pids else active_pids
-
-    future_cost = greedy_rollout_score(temp_pieces, temp_active_pids, target_offsets, mates_list, depth=depth)
-    scores = [primary_cost] + [future_cost]
-    return (scores, ((pid1, cid1), (pid2, cid2), vec))
 
 def greedy_rollout_score(pieces, active_pids, target_offsets, mates_list, depth=2):
     if depth == 0:
@@ -146,7 +148,7 @@ def greedy_rollout_score(pieces, active_pids, target_offsets, mates_list, depth=
     best_cost, ((best_pid, _), (_, _), best_vec) = best_move[0]
     # x, y, z = best_vec
     # print(f"| | | Greedy: Best move is p{best_pid} moving by <{x: .0f},{y: .0f},{z: .0f}>. Depth to go: {depth-1}. This took {time.time() - start_time:.2f}s.")
-    if best_move is None or best_cost == 0:
+    if best_move is None or np.linalg.norm(best_vec) <= 0.1:
         return 0  # No valid move or best greedy move is zero.
 
     # Execute best move
@@ -168,7 +170,8 @@ def get_cost_change(piece, translation, target_offset):
     current_cost = np.linalg.norm(current_location - target_offset)
     new_location = current_location + translation
     new_cost = np.linalg.norm(new_location - target_offset)
-    return new_cost - current_cost
+    diff_cost = new_cost - current_cost
+    return np.round(diff_cost, 9)
 
 
 # Top-Level Scripts
@@ -189,7 +192,10 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
 
     def print_best_move_info(scored_moves):
         best_costs, ((best_pid, _), (other_pid, _), vec) = scored_moves[0]
-        labels = [f"Lookahead {i+1}" for i in range(len(best_costs)-1)] + ["Rollout"]
+        first_cost = best_costs[0]
+        sum_cost = sum(best_costs)
+        best_costs += [sum_cost, sum_cost-first_cost]
+        labels = [f"Lookahead {i+1}" for i in range(len(best_costs)-3)] + ["Rollout"] + ["Total"] + ["Tot. After 1st"]
         scores = ", ".join(f"{l}: {s:.2f}" for l, s in zip(labels, best_costs))
         x, y, z = vec
         print(f"| Score [{scores}]")
@@ -256,17 +262,18 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
     return
 
 if __name__=="__main__":
+    reverse = True # Reverse lets you do Assembly by disassembly, which is much faster. 
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     # folder = f"results/{timestamp}"
-    folder = f"results/2025-04-25_20-30-56" # Existing folder
+    folder = f"results/2025-04-26_11-36-22" # Existing folder
     folder_sim = f"{folder}/states"
     folder_img = f"{folder}/frames"
 
     start_time = time.time()
-    run_assembler(n_stages=30, top_k=[20], rollout_depth=3, folder=folder_sim, reverse=True, start_from=13)
+    # run_assembler(n_stages=30, top_k=[20], rollout_depth=100, folder=folder_sim, reverse=reverse)
 
     # Visualize and save frames. Hold=True lets you drag around the scene
-    show_and_save_frames(folder_sim, folder_img, TARGET_OFFSETS, hold=False, start_from=13)
+    show_and_save_frames(folder_sim, folder_img, TARGET_OFFSETS, hold=False, reverse=reverse)
 
-    compile_gif(folder=folder_img)
+    compile_gif(folder=folder_img, reverse=False)
     print(f"This script took {time.time() - start_time:4f} seconds")
