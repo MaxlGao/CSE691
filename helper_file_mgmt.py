@@ -1,7 +1,11 @@
 import os
 import pickle
 
-def load_mates_list(filename='cache/mates_list.pkl'):
+def load_mates_list(reverse=False, folder='cache'):
+    if reverse:
+        filename = f'{folder}/mates_list_reversed.pkl'
+    else:
+        filename = f'{folder}/mates_list_normal.pkl'
     if os.path.exists(filename):
         with open(filename, 'rb') as f:
             print("Loaded mates_list from file.")
@@ -10,7 +14,11 @@ def load_mates_list(filename='cache/mates_list.pkl'):
         print("No cached mates_list found.")
         return None
 
-def save_mates_list(mates_list, filename='cache/mates_list.pkl'):
+def save_mates_list(mates_list, reverse=False, folder='cache'):
+    if reverse:
+        filename = f'{folder}/mates_list_reversed.pkl'
+    else:
+        filename = f'{folder}/mates_list_normal.pkl'
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, 'wb') as f:
         pickle.dump(mates_list, f)

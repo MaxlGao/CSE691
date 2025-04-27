@@ -43,14 +43,14 @@ def check_path_clear(this_mesh, other_meshes, translation, steps=20, tol=0.01):
 
     return True  # No collision detected along the entire path
 
-def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20, check_collision=True, check_support=False):
+def get_feasible_motions(this_piece, pieces, mates_list=None, steps=20, check_path=True):
     """
     Compute feasible, unique linear motions from `this_piece` to any other in `pieces`.
 
     Parameters:
         - this_piece: dict with 'mesh', 'corners', 'id'
         - pieces: list of all pieces
-        - valid_mates: optional dict of {pid1: ((pid1, cid1), (pid2, cid2))} to restrict testing
+        - mates_list: optional list of ((pid1, cid1), (pid2, cid2)) to restrict testing
         - steps: number of interpolation steps for collision checks (1 means skip motion path check)
         - tolerance: rounding tolerance for deduplication
     Returns:
@@ -74,8 +74,8 @@ def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20, check_c
     # Restricted motions in (+x, -x, +y, -y, +z, -z)
     restricted = [False, False, False, False, False, False]
         
-    if valid_mates is not None:
-        mates_list = valid_mates[this_pid] # Mates pertaining to this piece
+    if mates_list is not None:
+        mates_list = [mate for mate in mates_list if mate[0][0] == this_pid] # Mates pertaining to this piece
         # Match corners to actual positions
         this_corner_dict = {cid: pos for cid, pos in this_corners}
         other_corner_dict = {(pid, cid): pos for (pid,cid,pos) in other_corners}
@@ -123,7 +123,7 @@ def get_feasible_motions(this_piece, pieces, valid_mates=None, steps=20, check_c
 
         # Check Path of Motion
         test_mesh = this_mesh.copy()
-        if not check_collision or check_path_clear(test_mesh, other_meshes, vec, steps):
+        if not check_path or check_path_clear(test_mesh, other_meshes, vec, steps):
             feasible_motions.append(((p1, c1), (p2, c2), vec))
 
     return feasible_motions
@@ -137,8 +137,7 @@ def get_valid_mates(pieces, floor):
     # Augment piece list with floor
     all_pieces = copy.deepcopy(pieces)
     all_pieces.append(copy.deepcopy(floor))
-    cache = {}
-    cache_length = 0
+    mates_list = []
     for p1 in pieces:
         start_time = time.time()
         pid = p1['id']
@@ -150,11 +149,10 @@ def get_valid_mates(pieces, floor):
             valid_motions_p2 = get_feasible_motions(p1, p2, steps=1)
             valid_motions = valid_motions + valid_motions_p2
         valid_mates = [motion[:2] for motion in valid_motions]
-        cache[pid] = valid_mates
-        cache_length += len(valid_mates)
+        mates_list += valid_mates
         print(f"| Got {len(valid_mates):4d} mates for piece {pid}. This took {(time.time()-start_time):.2f} seconds.")
-    print(f"→ For this assembly, there are {cache_length} valid piece-to-piece mates")
-    return cache
+    print(f"→ For this assembly, there are {len(mates_list)} valid piece-to-piece mates")
+    return mates_list
 
 def get_unsupported_pids(assembly_pieces):
     """
@@ -205,9 +203,8 @@ def is_supported(this_mesh, other_meshes):
     if len(intersects) > 0:
         try:
             intersection = trimesh.boolean.union(intersects)
-        except:
+        except: # debug
             scene = trimesh.Scene()
-            # scene.camera_transform = get_transform_matrix([14.0, -16.0, 20.0, 0.0])
             scene.add_geometry(intersects[0], node_name=f"intersect")
             scene.show()
         intersection_cvhull = intersection.convex_hull
@@ -217,9 +214,8 @@ def is_supported(this_mesh, other_meshes):
     CoM_xy = this_mesh.center_mass[0:2] # only interested in x/y coordinate, if Z is down
     hull_points_xy = intersection_cvhull.vertices[:, :2]
     polygon = Polygon(hull_points_xy).convex_hull
-    # if polygon.contains(Point(CoM_xy)):
+    # if polygon.contains(Point(CoM_xy)): # Debug verification
     #     scene = trimesh.Scene()
-    #     scene.camera_transform = get_transform_matrix([14.0, -16.0, 20.0, 0.0])
     #     scene.add_geometry(intersection_cvhull, node_name=f"intersect")
     #     scene.show()
     return polygon.contains(Point(CoM_xy)) # If contains, return True
@@ -227,4 +223,20 @@ def is_supported(this_mesh, other_meshes):
 def move_piece(piece, translation):
     piece['mesh'].apply_translation(translation)
     piece['corners'] = [(cid, pos+translation) for cid,pos in piece['corners']]
+    if piece['gripper_config'] is not None:
+        piece['gripper_config'] = [piece['gripper_config'][0],
+                                piece['gripper_config'][1] + translation, 
+                                piece['gripper_config'][2]]
     return piece
+
+# Alt form of move_piece
+def apply_mate(pieces, mate):
+    (this_pid, this_cid), (other_pid, other_cid) = mate
+    this_piece = next(p for p in pieces if p['id'] == this_pid)
+    other_piece = next(p for p in pieces if p['id'] == other_pid)
+    this_corner = next(c for c in this_piece['corners'] if c[0] == this_cid)
+    other_corner = next(c for c in other_piece['corners'] if c[0] == other_cid)
+    vec = other_corner[1] - this_corner[1]
+    this_piece = move_piece(this_piece, vec)
+    # This should just update the piece info but I'll return the set
+    return pieces
