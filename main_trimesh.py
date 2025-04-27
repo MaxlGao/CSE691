@@ -226,6 +226,11 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
         pieces = [piece for piece in pieces_augmented if piece['id'] != FLOOR_INDEX_OFFSET ]
         floor = next(piece for piece in pieces_augmented if piece['id'] == FLOOR_INDEX_OFFSET)
         print(f"| Loaded {len(scored_moves)} moves.")
+        
+        if not scored_moves:
+            print(f"No valid moves found in loaded state {start_from}. Assembly might be complete or stuck.")
+            return
+        
         best_pid, best_vec = print_best_move_info(scored_moves)
 
         moved_piece = move_piece(pieces[best_pid], best_vec)
@@ -247,6 +252,13 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
         start_time = time.time()
         scored_moves, moves_compared = get_moves_scored_lookahead(pieces_augmented, active_pids, target_offsets, mates_list, top_k=top_k, rollout_depth=rollout_depth)
         print(f"| | Processed {moves_compared} moves.")
+        
+        # Add check for empty scored_moves list
+        if not scored_moves:
+            print(f"No valid moves found at stage {stage}. Assembly might be complete or stuck.")
+            save_simulation_state(stage, pieces_augmented, active_pids, [], folder=folder)
+            return
+        
         best_pid, best_vec = print_best_move_info(scored_moves)
         save_simulation_state(stage, pieces_augmented, active_pids, scored_moves, folder=folder)
         
@@ -270,7 +282,7 @@ if __name__=="__main__":
     folder_img = f"{folder}/frames"
 
     start_time = time.time()
-    # run_assembler(n_stages=30, top_k=[20], rollout_depth=100, folder=folder_sim, reverse=reverse)
+    run_assembler(n_stages=30, top_k=[20], rollout_depth=100, folder=folder_sim, reverse=reverse)
 
     # Visualize and save frames. Hold=True lets you drag around the scene
     show_and_save_frames(folder_sim, folder_img, TARGET_OFFSETS, hold=False, reverse=reverse)
