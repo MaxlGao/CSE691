@@ -153,10 +153,17 @@ def show_and_save_frames(folder_sim, folder_img, target_offsets, hold=False, sta
 def compile_gif(folder="results", suffix='', gif_name='animation.gif', fps=4, reverse=False):
     path = Path(folder)
     frame_files = sorted(path.glob(f"frame_*{suffix}.png"), reverse=reverse)
+    
+    if not frame_files:
+        print(f"No frames found matching pattern 'frame_*{suffix}.png' in folder {folder}")
+        return
+        
     images = [imageio.imread(str(frame)) for frame in frame_files]
+    
     # Hold last image for a bit
     for i in range(fps):
         images.append(images[-1])
+        
     if reverse:
         gif_name = "reversed_"+gif_name
     gif_path = path / gif_name
