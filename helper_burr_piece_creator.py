@@ -1,6 +1,5 @@
 import trimesh
 import numpy as np
-from helper_geometric_functions import move_piece
 
 REFERENCE_INDEX_OFFSET = 50 # Bump up reference piece indices
 FLOOR_INDEX_OFFSET = 100 # Bump up floor piece index
@@ -13,6 +12,19 @@ UNINTERESTING_CORNERS = { # Uses Corner IDs according to find_cube_corners
     # piece 0: none
 }
 START_OFFSETS_CORNERS = np.array([[1,-9,0],[-9,-3,0],[7,-3,0],[-5,7,0],[-5,-9,0],[1,7,0]])
+
+def trirotmat(angledeg, direction):
+    return trimesh.transformations.rotation_matrix(angle=np.radians(angledeg), direction=direction, point=[0, 0, 0])
+
+GRIPPER_CONFIGS = [ # Width, Active, Position, Rotation
+    (2, False, [ 3,  0, 1], trirotmat(90, [1, 0, 0]) @ trirotmat(-135, [0, 0, 1])),
+    (6, False, [-1, 0, 1], trirotmat(90, [1, 0, 0]) @ trirotmat(-45, [0, 0, 1])),
+    (6, False, [ 1, 0, 1], trirotmat(90, [1, 0, 0]) @ trirotmat(-135, [0, 0, 1])),
+    (2, False, [ 0,  1, 3], trirotmat(90, [0, 1, 0]) @ trirotmat(-45, [0, 0, 1])),
+    (2, False, [ 0, -1, 3], trirotmat(90, [0, 1, 0]) @ trirotmat(45, [0, 0, 1])),
+    (2, False, [ 3,  0, 0], trirotmat(90, [1, 0, 0]) @ trirotmat(180, [0, 0, 1]))
+]
+
 # Creation Functions
 def find_cube_corners(mesh, tol=1e-6):
     """
@@ -132,12 +144,9 @@ def create_gripper(config=None, color=[127, 127, 127, 255]):
     gripper = trimesh.util.concatenate([left_finger, right_finger, left_fingertip, right_fingertip, palm])
     gripper.visual.face_colors = color
     if config is not None:
-        gripper.apply_transform(config[2])
-        gripper.apply_translation(config[1])
+        gripper.apply_transform(config[3])
+        gripper.apply_translation(config[2])
     return gripper
-
-def trirotmat(angledeg, direction):
-    return trimesh.transformations.rotation_matrix(angle=np.radians(angledeg), direction=direction, point=[0, 0, 0])
 
 def define_all_burr_pieces(start_offsets=None, reference=False):
     """
@@ -156,40 +165,31 @@ def define_all_burr_pieces(start_offsets=None, reference=False):
         [255, 0, 255, opacity]   # Magenta
     ]
 
-    gripper_configs = [
-        (2, [ 3,  0, 1], trirotmat(90, [1, 0, 0]) @ trirotmat(-135, [0, 0, 1])),
-        (6, [-1, 0, 1], trirotmat(90, [1, 0, 0]) @ trirotmat(-45, [0, 0, 1])),
-        (6, [ 1, 0, 1], trirotmat(90, [1, 0, 0]) @ trirotmat(-135, [0, 0, 1])),
-        (2, [ 0,  1, 3], trirotmat(90, [0, 1, 0]) @ trirotmat(-45, [0, 0, 1])),
-        (2, [ 0, -1, 3], trirotmat(90, [0, 1, 0]) @ trirotmat(45, [0, 0, 1])),
-        (2, [ 3,  0, 0], trirotmat(90, [1, 0, 0]) @ trirotmat(180, [0, 0, 1]))
-    ]
-
     pieces = []
 
     pieces.append(create_burr_piece([
         {'size': [6, 2, 2], 'position': [0, 0, 0]},
-    ], colors[0], 0, reference=reference, gripper=gripper_configs[0]))
+    ], colors[0], 0, reference=reference, gripper=GRIPPER_CONFIGS[0]))
     pieces.append(create_burr_piece([
         {'size': [1, 2, 1], 'position': [-0.5, 0, -0.5]},
         {'size': [1, 2, 2], 'position': [-0.5, -2, 0]},
         {'size': [1, 2, 2], 'position': [-0.5, 2, 0]},
         {'size': [1, 1, 2], 'position': [0.5, -2.5, 0]},
         {'size': [1, 1, 2], 'position': [0.5, 2.5, 0]},
-    ], colors[1], 1, reference=reference, gripper=gripper_configs[1]))
+    ], colors[1], 1, reference=reference, gripper=GRIPPER_CONFIGS[1]))
     pieces.append(create_burr_piece([
         {'size': [2, 2, 2], 'position': [0, -2, 0]},
         {'size': [1, 2, 1], 'position': [0.5, 0, -0.5]},
         {'size': [1, 2, 2], 'position': [0.5, 2, 0]},
         {'size': [1, 1, 2], 'position': [-0.5, 2.5, 0]},
         {'size': [1, 1, 1], 'position': [-0.5, -0.5, -0.5]},
-    ], colors[2], 2, reference=reference, gripper=gripper_configs[2]))
+    ], colors[2], 2, reference=reference, gripper=GRIPPER_CONFIGS[2]))
     pieces.append(create_burr_piece([
         {'size': [2, 1, 6], 'position': [0, 0.5, 0]},
         {'size': [2, 1, 1], 'position': [0, -0.5, 2.5]},
         {'size': [2, 1, 1], 'position': [0, -0.5, -0.5]},
         {'size': [2, 1, 1], 'position': [0, -0.5, -2.5]},
-    ], colors[3], 3, reference=reference, gripper=gripper_configs[3]))
+    ], colors[3], 3, reference=reference, gripper=GRIPPER_CONFIGS[3]))
     pieces.append(create_burr_piece([
         {'size': [2, 2, 1], 'position': [0, 0, -2.5]},
         {'size': [2, 2, 1], 'position': [0, 0, 2.5]},
@@ -197,14 +197,24 @@ def define_all_burr_pieces(start_offsets=None, reference=False):
         {'size': [2, 1, 1], 'position': [0, -0.5, 1.5]},
         {'size': [1, 1, 2], 'position': [-0.5, -0.5, 0]},
         {'size': [1, 1, 1], 'position': [-0.5, 0.5, -0.5]},
-    ], colors[4], 4, reference=reference, gripper=gripper_configs[4]))
+    ], colors[4], 4, reference=reference, gripper=GRIPPER_CONFIGS[4]))
     pieces.append(create_burr_piece([
         {'size': [6, 2, 1], 'position': [0, 0, -0.5]},
         {'size': [1, 2, 1], 'position': [2.5, 0, 0.5]},
         {'size': [1, 2, 1], 'position': [-2.5, 0, 0.5]},
-    ], colors[5], 5, reference=reference, gripper=gripper_configs[5]))
+    ], colors[5], 5, reference=reference, gripper=GRIPPER_CONFIGS[5]))
 
     if start_offsets is not None:
         for piece in pieces:
             piece = move_piece(piece, start_offsets[piece['id']])
     return pieces
+
+def move_piece(piece, translation):
+    piece['mesh'].apply_translation(translation)
+    piece['corners'] = [(cid, pos+translation) for cid,pos in piece['corners']]
+    if piece['gripper_config'] is not None:
+        piece['gripper_config'] = [piece['gripper_config'][0],
+                                   piece['gripper_config'][1],
+                                   piece['gripper_config'][2] + translation, 
+                                   piece['gripper_config'][3]]
+    return piece

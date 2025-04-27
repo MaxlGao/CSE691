@@ -7,10 +7,10 @@ import re
 from helper_burr_piece_creator import create_floor, define_all_burr_pieces, create_gripper
 from helper_burr_piece_creator import REFERENCE_INDEX_OFFSET, FLOOR_INDEX_OFFSET
 from helper_file_mgmt import load_simulation_state
-from helper_geometric_functions import move_piece, is_supported
+from helper_geometric_functions import move_piece, get_unsupported_pids
 
 # Rendering Scripts
-def render_scene(all_pieces, arrows=None, grippers=[], camera = [14.0, -16.0, 20.0, 0.0]):
+def render_scene(all_pieces, arrows=None, camera = [14.0, -16.0, 20.0, 0.0]):
     scene = trimesh.Scene()
     scene.camera_transform = get_transform_matrix(camera)
     for piece in all_pieces:
@@ -18,9 +18,8 @@ def render_scene(all_pieces, arrows=None, grippers=[], camera = [14.0, -16.0, 20
         scene.add_geometry(piece['mesh'], node_name=f"piece_{pid}")
         if pid == FLOOR_INDEX_OFFSET or pid < REFERENCE_INDEX_OFFSET:
             show_corners(scene, piece)
-    for i, gripper in enumerate(grippers):
-        if gripper is not None:
-            scene.add_geometry(gripper, node_name=f"gripper_{i}")
+        if piece['gripper_config'] is not None and piece['gripper_config'][1]:
+            scene.add_geometry(create_gripper(config=piece['gripper_config']), node_name=f"gripper_{pid}")
     if arrows:
         # Remove old arrows
         arrow_nodes = [name for name in scene.graph.nodes_geometry if name.startswith('arrow_')]
@@ -98,18 +97,15 @@ def save_animation_frame(scene, index, folder="results", suffix=''):
         with open(image_path, 'wb') as f:
             f.write(png)
         print(f"Saved frame {index} to {image_path}")
-    except ZeroDivisionError:
-        # Use a more direct approach that avoids window resizing
-        from PIL import Image
-        import numpy as np
-        
-        # Generate a basic image with a message
-        img = np.ones((600, 800, 3), dtype=np.uint8) * 255
-        img_pil = Image.fromarray(img)
-        img_pil.save(image_path)
-        print(f"Error rendering frame {index}, saved placeholder to {image_path}")
+    except:
+        # do it again idk
+        png = scene.save_image(resolution=(800, 600), visible=True)
+        with open(image_path, 'wb') as f:
+            f.write(png)
+        print("oopsie")
+        print(f"Saved frame {index} to {image_path}")
 
-def show_and_save_frames(folder_sim, folder_img, target_offsets, hold=False, start_from=0, reverse=False):
+def show_and_save_frames(folder_sim, folder_img, target_offsets=None, hold=False, start_from=0, reverse=False, steps=0, intermediate=0):
     # Automatically find all simulation step files
     sim_folder = Path(folder_sim)
     step_files = sorted(sim_folder.glob('step_*.pkl'))
@@ -127,45 +123,77 @@ def show_and_save_frames(folder_sim, folder_img, target_offsets, hold=False, sta
             continue
         state = load_simulation_state(sc, folder=folder_sim)
         pieces = state['pieces']
+        # Full check for support
+        for piece in pieces:
+            if piece['gripper_config'] is not None:
+                piece['gripper_config'][1] = False
+        unsupported_ids = get_unsupported_pids(pieces)
+        for id in unsupported_ids:
+            un_piece = pieces[id]
+            if un_piece['gripper_config'] is not None:
+                un_piece['gripper_config'][1] = True # Activate gripper for unsupported pieces
 
-        if sc == 0:  # On first step only
+        if sc == 0 and not target_offsets is None:  # On first step only
             reference_pieces = define_all_burr_pieces(reference=True)
             target_offsets = target_offsets + [0, 0, 3]
             for piece in reference_pieces:
                 piece = move_piece(piece, target_offsets[piece['id'] - REFERENCE_INDEX_OFFSET])
                 pieces.append(piece)
 
-        grippers = []
-        for piece in pieces:
-            grippers.append(create_gripper(config=piece['gripper_config']))
-        scene = render_scene(pieces, grippers=grippers)
+        scene = render_scene(pieces)
         save_animation_frame(scene, sc, folder=folder_img)
         if hold:
             scene.show()
 
         floor = create_floor(reverse=reverse)
         arrows = show_moves_scored(state['available_moves'], state['pieces'], floor)
-        scene = render_scene(state['pieces'], arrows=arrows, grippers=grippers)
-        save_animation_frame(scene, sc, folder=folder_img, suffix='a')
+        scene = render_scene(state['pieces'], arrows=arrows)
+        save_animation_frame(scene, sc, folder=folder_img, suffix='_a')
         if hold:
             scene.show()
 
-def compile_gif(folder="results", suffix='', gif_name='animation.gif', fps=4, reverse=False):
+        # Smoothly animate the motion
+        if steps>0 and len(state['available_moves']) > 0:
+            move = state['available_moves'][0]
+            _, ((best_pid, _), (_, _), vec) = move
+            pieces[best_pid]['gripper_config'][1] = True # Activate gripper for moved
+            other_pieces = [piece for piece in pieces if piece['id'] != best_pid]
+            other_pieces = [piece for piece in other_pieces if piece['id'] != FLOOR_INDEX_OFFSET]
+            unsupported_ids = get_unsupported_pids(other_pieces)
+            for id in unsupported_ids:
+                un_piece = pieces[id]
+                un_piece['gripper_config'][1] = True # Activate gripper for unsupported pieces
+            
+            frac_vec = vec / steps
+            for i in range(steps):
+                move_piece(pieces[best_pid], frac_vec)
+                if i < intermediate:
+                    continue
+                scene = render_scene(pieces)
+                save_animation_frame(scene, sc, folder=folder_img, suffix=f'_f{i:02d}i')
+
+def compile_gif(folder="results", gif_name='animation', fps=20, reverse=False):
     path = Path(folder)
-    frame_files = sorted(path.glob(f"frame_*{suffix}.png"), reverse=reverse)
+    frame_files = sorted(path.glob(f"frame_*.png"), reverse=reverse)
     
     if not frame_files:
-        print(f"No frames found matching pattern 'frame_*{suffix}.png' in folder {folder}")
+        print(f"No frames found matching pattern 'frame_*.png' in folder {folder}")
         return
         
-    images = [imageio.imread(str(frame)) for frame in frame_files]
+    images = []
+    for frame in frame_files:
+        img = imageio.imread(str(frame))
+        filename = frame.stem  # stem is the filename without extension
+        if filename.endswith('i'):
+            images.extend([img])
+        else:
+            images.extend([img] * 6)
     
     # Hold last image for a bit
-    for i in range(fps):
-        images.append(images[-1])
-        
+    images.extend([images[-1]] * fps)
     if reverse:
-        gif_name = "reversed_"+gif_name
+        gif_name = gif_name + "_reversed"
+    gif_name = gif_name + ".gif"
     gif_path = path / gif_name
     imageio.mimsave(gif_path, images, fps=fps, loop=0)
     print(f"GIF saved to {gif_path}")

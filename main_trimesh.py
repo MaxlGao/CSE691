@@ -30,6 +30,11 @@ def get_top_k_scored_moves(pieces, active_pids, target_offsets, k=float("inf"), 
     # First get a headcount of who's unsupported, except the floor
     pieces_not_floor = [piece for piece in pieces if piece['id'] != FLOOR_INDEX_OFFSET]
     unsupported_ids = get_unsupported_pids(pieces_not_floor)
+    for piece in pieces_not_floor:
+        piece['gripper_config'][1] = False
+    for id in unsupported_ids:
+        piece = pieces[id]
+        piece['gripper_config'][1] = True # Activate gripper for unsupported pieces
     # If we're at the limit, only these unsupported pieces can get moved. Otherwise, carry on.
     movable_ids = [i for i in range(NUM_PIECES)]
     if len(unsupported_ids) >= max_held:
@@ -65,8 +70,12 @@ def get_top_k_scored_moves(pieces, active_pids, target_offsets, k=float("inf"), 
         _, ((pid1, _), (_, _), vec) = scored_move
         this_piece = pieces[pid1]
         test_mesh = this_piece['mesh'].copy()
-        active_meshes = [piece['mesh'] for piece in active_pieces if piece['id'] != pid1]
-        if check_path_clear(test_mesh, active_meshes, vec, 20):
+        other_pieces = [piece for piece in active_pieces if piece['id'] != pid1]
+        other_meshes = [piece['mesh'] for piece in other_pieces]
+        if check_path_clear(test_mesh, other_meshes, vec, 20):
+            # If removing THIS piece leads to 2+ unsupported pieces, it won't work. 
+            if len(get_unsupported_pids(other_pieces)) >= max_held:
+                continue
             feasible_scored_moves.append(scored_move)
             if len(feasible_scored_moves) == k:
                 break
@@ -234,6 +243,7 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
         best_pid, best_vec = print_best_move_info(scored_moves)
 
         moved_piece = move_piece(pieces[best_pid], best_vec)
+        moved_piece['gripper_config'][1] = True # Activate gripper for moved piece
         active_pids = active_pids + [best_pid] if best_pid not in active_pids else active_pids
         print(f"→ Fast-Finished {start_from+1} / {n_stages}.")
 
@@ -265,6 +275,7 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
         # Now execute
         moved_piece = pieces[best_pid]
         moved_piece = move_piece(moved_piece, best_vec)
+        moved_piece['gripper_config'][1] = True # Activate gripper for moved piece
         active_pids = active_pids + [best_pid] if best_pid not in active_pids else active_pids
         print(f"→ Done with Stage {stage+1} / {n_stages}. This took {time.time() - start_time:.2f} seconds.")
 
@@ -276,16 +287,17 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
 if __name__=="__main__":
     reverse = True # Reverse lets you do Assembly by disassembly, which is much faster. 
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    # folder = f"results/{timestamp}"
-    folder = f"results/2025-04-26_11-36-22" # Existing folder
+    folder = f"results/{timestamp}"
+    # folder = f"results/2025-04-26_19-39-03" # Existing folder
     folder_sim = f"{folder}/states"
     folder_img = f"{folder}/frames"
 
     start_time = time.time()
-    run_assembler(n_stages=30, top_k=[20], rollout_depth=100, folder=folder_sim, reverse=reverse)
+    run_assembler(n_stages=30, top_k=[100, 10], rollout_depth=1, folder=folder_sim, reverse=reverse)
 
     # Visualize and save frames. Hold=True lets you drag around the scene
-    show_and_save_frames(folder_sim, folder_img, TARGET_OFFSETS, hold=False, reverse=reverse)
+    show_and_save_frames(folder_sim, folder_img, hold=False, reverse=reverse, steps=20)
 
     compile_gif(folder=folder_img, reverse=False)
+    compile_gif(folder=folder_img, reverse=True)
     print(f"This script took {time.time() - start_time:4f} seconds")

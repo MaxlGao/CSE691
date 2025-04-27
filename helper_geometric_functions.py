@@ -3,11 +3,12 @@ import numpy as np
 import time
 import copy
 from shapely.geometry import Point, Polygon
+from helper_burr_piece_creator import create_gripper, FLOOR_INDEX_OFFSET, GRIPPER_CONFIGS
 
 DOWN = np.array([0,0,-1])
 
 # Geometry Functions
-def check_path_clear(this_mesh, other_meshes, translation, steps=20, tol=0.01):
+def check_path_clear(this_mesh, other_meshes, translation, steps=20, tol=0.01, gripper=None):
     """
     Check whether this_mesh can be translated without colliding with other meshes(s)
     at any step along the way. Handles both single-piece and multi-piece cases.
@@ -17,6 +18,7 @@ def check_path_clear(this_mesh, other_meshes, translation, steps=20, tol=0.01):
         other_meshes: EITHER trimesh.Trimesh OR List[trimesh.Trimesh] - the other pieces
         translation: np.ndarray, shape (3,) - Translation vector
         steps: int - Number of interpolation steps to test
+        gripper: Trimesh - The gripper of the moving piece, at the original position
     Returns:
         bool - True if path is clear
     """
@@ -154,7 +156,7 @@ def get_valid_mates(pieces, floor):
     print(f"→ For this assembly, there are {len(mates_list)} valid piece-to-piece mates")
     return mates_list
 
-def get_unsupported_pids(assembly_pieces):
+def get_unsupported_pids(assembly_pieces, basic_method=True):
     """
     Recursively determine which pieces are unsupported based on actual supported ancestry.
     A piece is only supported if it's on the floor or supported by another supported piece.
@@ -163,22 +165,32 @@ def get_unsupported_pids(assembly_pieces):
     remaining_ids = {p['id'] for p in assembly_pieces}
     id_to_piece = {p['id']: p for p in assembly_pieces}
 
-    # Step 1: Add pieces directly supported by the floor
+    # Step 1: Add pieces directly supported by the floor (and the floor is supported)
     for piece in assembly_pieces:
-        if piece['mesh'].bounds[0][2] == 0:  # on the floor
+        if piece['mesh'].bounds[0][2] == 0 or piece['id'] == FLOOR_INDEX_OFFSET:
             supported_ids.add(piece['id'])
 
-    # Step 2: Propagate support
-    changed = True
-    while changed:
-        changed = False
-        for pid in remaining_ids - supported_ids:
+    unconfirmed_ids = remaining_ids - supported_ids
+    if basic_method:
+        for pid in unconfirmed_ids:
             piece = id_to_piece[pid]
-            potential_supporters = [id_to_piece[sid] for sid in supported_ids if sid != pid]
-            support_meshes = [p['mesh'] for p in potential_supporters]
-            if is_supported(piece['mesh'], support_meshes):
+            other_meshes = [p['mesh'] for p in assembly_pieces if p['id'] != pid]
+            if is_supported(piece['mesh'], other_meshes):
+                piece['gripper_config'][1] = False # Deactivate gripper for now
                 supported_ids.add(pid)
-                changed = True
+    else:
+        # Step 2: Propagate support
+        changed = True
+        while changed:
+            changed = False
+            for pid in remaining_ids - supported_ids:
+                piece = id_to_piece[pid]
+                potential_supporters = [id_to_piece[sid] for sid in supported_ids if sid != pid]
+                support_meshes = [p['mesh'] for p in potential_supporters]
+                if is_supported(piece['mesh'], support_meshes):
+                    piece['gripper_config'][1] = False # Deactivate gripper for now
+                    supported_ids.add(pid)
+                    changed = True
 
     # Step 3: Unsupported pieces are those not marked as supported
     return list(remaining_ids - supported_ids)
@@ -225,8 +237,9 @@ def move_piece(piece, translation):
     piece['corners'] = [(cid, pos+translation) for cid,pos in piece['corners']]
     if piece['gripper_config'] is not None:
         piece['gripper_config'] = [piece['gripper_config'][0],
-                                piece['gripper_config'][1] + translation, 
-                                piece['gripper_config'][2]]
+                                   piece['gripper_config'][1],
+                                   piece['gripper_config'][2] + translation, 
+                                   piece['gripper_config'][3]]
     return piece
 
 # Alt form of move_piece
