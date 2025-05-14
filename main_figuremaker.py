@@ -2,9 +2,11 @@ import numpy as np
 import time
 from helper_burr_piece_creator import create_floor, define_all_burr_pieces, REFERENCE_INDEX_OFFSET, FLOOR_INDEX_OFFSET
 from helper_geometric_functions import check_path_clear, get_feasible_motions, get_valid_mates, is_supported, move_piece
-from helper_display import render_scene, show_moves_scored, save_animation_frame, display_pieces
+from helper_display import render_scene, show_moves_scored, save_animation_frame, display_pieces, get_transform_matrix
 from helper_file_mgmt import load_mates_list, load_simulation_state, save_mates_list, save_simulation_state
-from main_trimesh import get_top_k_scored_moves, START_OFFSETS
+from main_trimesh import get_top_k_scored_moves
+from helper_burr_reference import BURR_DICT_EASY, BURR_DICT_HARD
+import trimesh
 import copy
 
 
@@ -99,8 +101,9 @@ def test_support():
         this_pid = this_piece['id']
         this_corners = this_piece['corners']
 
-        other_meshes = [piece['mesh'] for piece in all_pieces if piece['id'] != this_pid]
-        other_meshes_not_floor = [piece['mesh'] for piece in pieces if piece['id'] != this_pid]
+        other_pieces = [piece for piece in all_pieces if piece['id'] != this_pid]
+        other_meshes = [piece['mesh'] for piece in other_pieces]
+        other_meshes_not_floor = [piece['mesh'] for piece in other_pieces if piece['id'] != FLOOR_INDEX_OFFSET]
         other_corners = []
         for piece in all_pieces:
             if piece['id'] == this_piece['id']:
@@ -108,7 +111,7 @@ def test_support():
             for cid, pos in piece['corners']:
                 other_corners.append((piece['id'], cid, pos))
 
-        this_mates_list = mates_list[this_pid] # Mates pertaining to this piece
+        this_mates_list = [mate for mate in mates_list if mate[0][0] == this_pid] # Mates pertaining to this piece
         # Match corners to actual positions
         this_corner_dict = {cid: pos for cid, pos in this_corners}
         other_corner_dict = {(pid, cid): pos for (pid,cid,pos) in other_corners}
@@ -124,6 +127,9 @@ def test_support():
             test_piece = copy.deepcopy(this_piece)
             test_piece = move_piece(test_piece, vec)
             test_mesh = test_piece['mesh']
+            for face in test_mesh.visual.face_colors:
+                face[3] = 100
+            # test_mesh.visual.main_color[3] = 0
             test_bbox = test_mesh.bounds
             collide = False
             for other_mesh in other_meshes:
@@ -137,14 +143,30 @@ def test_support():
             # Check supports
             support = is_supported(test_mesh, other_meshes_not_floor) # Including the floor is inefficient
             supports.append(support)
-            # if support and vec[2] > 0: # Show cases where a piece lays on top of another.
-            #     scene = render_scene(all_pieces + [test_piece])
-            #     scene.show()
+            if support and vec[2] > 0: # Show cases where a piece lays on top of another.
+                offset = 0.01 * np.array([0,0,-1])
+                translated = test_mesh.copy()
+                translated.apply_translation(offset)
+
+                intersects = []
+                for other_mesh in other_meshes_not_floor:
+                    intersect = trimesh.boolean.intersection([translated, other_mesh], check_volume=False)
+                    if not intersect.is_empty and intersect.volume > 0.001:
+                        intersect = intersect.convex_hull
+                        intersects.append(intersect)
+                intersection = trimesh.boolean.union(intersects)
+                intersection_cvhull = intersection.convex_hull
+                intersection_cvhull.apply_translation(-offset)
+                scene = render_scene(other_pieces + [test_piece])
+                scene.add_geometry(intersection_cvhull, node_name=f"intersect")
+                scene.camera_transform = get_transform_matrix([14.0, -16.0, 20.0, 0.0])
+                scene.show()
     print(f"There are {supports.count(True)} configurations with support and {supports.count(False)} without.")
     return
 
 if __name__=="__main__":
     start_time = time.time()
-    scene = display_pieces(offsets=START_OFFSETS)
+    scene = display_pieces(offsets=BURR_DICT_HARD['initial_offsets'])
     # scene = display_connections()
+    # scene = test_support()
     scene.show()

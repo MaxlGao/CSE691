@@ -8,7 +8,7 @@ from helper_burr_piece_creator import create_gripper, FLOOR_INDEX_OFFSET, GRIPPE
 DOWN = np.array([0,0,-1])
 
 # Geometry Functions
-def check_path_clear(this_mesh, other_meshes, translation, steps=20, tol=0.01, gripper=None):
+def check_path_clear(this_mesh, other_meshes, translation, steps=20, tol=0.01, floor_active=True):
     """
     Check whether this_mesh can be translated without colliding with other meshes(s)
     at any step along the way. Handles both single-piece and multi-piece cases.
@@ -18,14 +18,16 @@ def check_path_clear(this_mesh, other_meshes, translation, steps=20, tol=0.01, g
         other_meshes: EITHER trimesh.Trimesh OR List[trimesh.Trimesh] - the other pieces
         translation: np.ndarray, shape (3,) - Translation vector
         steps: int - Number of interpolation steps to test
-        gripper: Trimesh - The gripper of the moving piece, at the original position
+        floor_active: bool - whether or not the floor has collision
     Returns:
         bool - True if path is clear
     """
     # Convert single piece to list for uniform handling
     if not isinstance(other_meshes, (list, tuple)):
         other_meshes = [other_meshes]
-    
+    if not floor_active:
+        other_meshes = other_meshes[:-1] # exclude last piece, which is floor
+        
     this_bbox = this_mesh.bounds
     for step in reversed(range(1, steps + 1)): # Start from end of trajectory, where collisions are most likely
         frac_translation = (translation * step) / (steps)
@@ -176,7 +178,7 @@ def get_unsupported_pids(assembly_pieces, basic_method=True):
             piece = id_to_piece[pid]
             other_meshes = [p['mesh'] for p in assembly_pieces if p['id'] != pid]
             if is_supported(piece['mesh'], other_meshes):
-                piece['gripper_config'][1] = False # Deactivate gripper for now
+                piece['gripper_config']['active'] = False # Deactivate gripper for now
                 supported_ids.add(pid)
     else:
         # Step 2: Propagate support
@@ -188,7 +190,7 @@ def get_unsupported_pids(assembly_pieces, basic_method=True):
                 potential_supporters = [id_to_piece[sid] for sid in supported_ids if sid != pid]
                 support_meshes = [p['mesh'] for p in potential_supporters]
                 if is_supported(piece['mesh'], support_meshes):
-                    piece['gripper_config'][1] = False # Deactivate gripper for now
+                    piece['gripper_config']['active'] = False # Deactivate gripper for now
                     supported_ids.add(pid)
                     changed = True
 
@@ -236,10 +238,7 @@ def move_piece(piece, translation):
     piece['mesh'].apply_translation(translation)
     piece['corners'] = [(cid, pos+translation) for cid,pos in piece['corners']]
     if piece['gripper_config'] is not None:
-        piece['gripper_config'] = [piece['gripper_config'][0],
-                                   piece['gripper_config'][1],
-                                   piece['gripper_config'][2] + translation, 
-                                   piece['gripper_config'][3]]
+        piece['gripper_config']['position'] = piece['gripper_config']['position'] + translation
     return piece
 
 # Alt form of move_piece

@@ -8,6 +8,8 @@ from helper_burr_piece_creator import create_floor, define_all_burr_pieces, crea
 from helper_burr_piece_creator import REFERENCE_INDEX_OFFSET, FLOOR_INDEX_OFFSET
 from helper_file_mgmt import load_simulation_state
 from helper_geometric_functions import move_piece, get_unsupported_pids
+import concurrent.futures
+from tqdm import tqdm
 
 # Rendering Scripts
 def render_scene(all_pieces, arrows=None, camera = [14.0, -16.0, 20.0, 0.0]):
@@ -18,7 +20,7 @@ def render_scene(all_pieces, arrows=None, camera = [14.0, -16.0, 20.0, 0.0]):
         scene.add_geometry(piece['mesh'], node_name=f"piece_{pid}")
         if pid == FLOOR_INDEX_OFFSET or pid < REFERENCE_INDEX_OFFSET:
             show_corners(scene, piece)
-        if piece['gripper_config'] is not None and piece['gripper_config'][1]:
+        if piece['gripper_config'] is not None and piece['gripper_config']['active']:
             scene.add_geometry(create_gripper(config=piece['gripper_config']), node_name=f"gripper_{pid}")
     if arrows:
         # Remove old arrows
@@ -105,6 +107,13 @@ def save_animation_frame(scene, index, folder="results", suffix=''):
         print("oopsie")
         print(f"Saved frame {index} to {image_path}")
 
+def move_and_snapshot(arg):
+    idx, translation, pieces, best_pid, sc, folder_img = arg
+    move_piece(pieces[best_pid], translation)
+    scene = render_scene(pieces)
+    save_animation_frame(scene, sc, folder=folder_img, suffix=f'_f{idx:02d}i')
+    return 1
+
 def show_and_save_frames(folder_sim, folder_img, target_offsets=None, hold=False, start_from=0, reverse=False, steps=0, intermediate=0):
     # Automatically find all simulation step files
     sim_folder = Path(folder_sim)
@@ -126,16 +135,15 @@ def show_and_save_frames(folder_sim, folder_img, target_offsets=None, hold=False
         # Full check for support
         for piece in pieces:
             if piece['gripper_config'] is not None:
-                piece['gripper_config'][1] = False
+                piece['gripper_config']['active'] = False
         unsupported_ids = get_unsupported_pids(pieces)
         for id in unsupported_ids:
             un_piece = pieces[id]
             if un_piece['gripper_config'] is not None:
-                un_piece['gripper_config'][1] = True # Activate gripper for unsupported pieces
+                un_piece['gripper_config']['active'] = True # Activate gripper for unsupported pieces
 
         if sc == 0 and not target_offsets is None:  # On first step only
             reference_pieces = define_all_burr_pieces(reference=True)
-            target_offsets = target_offsets + [0, 0, 3]
             for piece in reference_pieces:
                 piece = move_piece(piece, target_offsets[piece['id'] - REFERENCE_INDEX_OFFSET])
                 pieces.append(piece)
@@ -156,21 +164,22 @@ def show_and_save_frames(folder_sim, folder_img, target_offsets=None, hold=False
         if steps>0 and len(state['available_moves']) > 0:
             move = state['available_moves'][0]
             _, ((best_pid, _), (_, _), vec) = move
-            pieces[best_pid]['gripper_config'][1] = True # Activate gripper for moved
+            pieces[best_pid]['gripper_config']['active'] = True # Activate gripper for moved
             other_pieces = [piece for piece in pieces if piece['id'] != best_pid]
             other_pieces = [piece for piece in other_pieces if piece['id'] != FLOOR_INDEX_OFFSET]
             unsupported_ids = get_unsupported_pids(other_pieces)
             for id in unsupported_ids:
                 un_piece = pieces[id]
-                un_piece['gripper_config'][1] = True # Activate gripper for unsupported pieces
+                un_piece['gripper_config']['active'] = True # Activate gripper for unsupported pieces
             
-            frac_vec = vec / steps
-            for i in range(steps):
-                move_piece(pieces[best_pid], frac_vec)
-                if i < intermediate:
-                    continue
-                scene = render_scene(pieces)
-                save_animation_frame(scene, sc, folder=folder_img, suffix=f'_f{i:02d}i')
+            # frac_vec = vec / steps
+            args_list = [(i, (i+1) * vec / steps, pieces, best_pid, sc, folder_img) for i in range(steps)]
+
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                futures = [executor.submit(move_and_snapshot, arg) for arg in args_list]
+                for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), ncols=100):
+                    a = future.result()
+
 
 def compile_gif(folder="results", gif_name='animation', fps=20, reverse=False):
     path = Path(folder)
@@ -199,12 +208,12 @@ def compile_gif(folder="results", gif_name='animation', fps=20, reverse=False):
     print(f"GIF saved to {gif_path}")
 
 def display_pieces(index=None, offsets=np.array([[0,0,4],[-1,0,3],[1,0,3],[0,1,3],[0,-1,3],[0,0,2]]), suffix='b', folder="results"):
-    pieces = define_all_burr_pieces(offsets)
+    pieces = define_all_burr_pieces(offsets=offsets)
     floor = create_floor()
     grippers = []
     for piece in pieces:
         grippers.append(create_gripper(config=piece['gripper_config']))
-    scene = render_scene(pieces + [floor], grippers=grippers)
+    scene = render_scene(pieces + [floor])
     if index:
         save_animation_frame(scene, index, suffix=suffix, folder=folder)
 
