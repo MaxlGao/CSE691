@@ -11,6 +11,9 @@ get_valid_mates, move_piece, get_unsupported_pids
 from helper_display import compile_gif, show_and_save_frames, display_pieces
 from helper_file_mgmt import load_mates_list, load_simulation_state, save_mates_list, save_simulation_state
 from datetime import datetime
+import pyglet
+from functools import wraps
+import warnings
 
 # Nomenclature
 # Scored Move = (Scores, Move) 
@@ -19,6 +22,30 @@ from datetime import datetime
 # Pieces = [Piece, ..., Piece] 
 #        = [{Mesh, Corners, ID}, ..., Piece]
 #        = [{Mesh, (ID, World Position), ID}, ..., Piece]
+
+# Patch to prevent ZeroDivisionError in Trimesh viewer
+def patch_pyglet_on_resize():
+    original_dispatch_event = pyglet.window.Window.dispatch_event
+    
+    @wraps(original_dispatch_event)
+    def safe_dispatch_event(self, event_type, *args):
+        try:
+            # For on_resize event, ensure height is never zero
+            if event_type == 'on_resize' and len(args) >= 2:
+                width, height = args[0], args[1]
+                if height <= 0:
+                    return False  # Skip the event if height is zero or negative
+            return original_dispatch_event(self, event_type, *args)
+        except ZeroDivisionError:
+            warnings.warn("Prevented ZeroDivisionError during window resize")
+            return False
+        except Exception as e:
+            warnings.warn(f"Error in window event handling: {str(e)}")
+            return False
+    
+    pyglet.window.Window.dispatch_event = safe_dispatch_event
+
+patch_pyglet_on_resize()
 
 np.set_printoptions(formatter={'int': '{:2d}'.format})
 NUM_PIECES = 6

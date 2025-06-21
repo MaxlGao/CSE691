@@ -11,3 +11,4 @@ helper_robot_arms.py
 main_trimesh_shorter copy.py
 temp.py
 visualize_final.py
+/__pycache__/
