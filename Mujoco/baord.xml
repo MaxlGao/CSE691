@@ -1,0 +1,56 @@
+<mujoco model="burr_puzzle">
+  <compiler coordinate="local" autolimits="true" inertiafromgeom="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="RK4"/>
+
+  <asset>
+    <!-- Adjust paths if your OBJs are elsewhere -->
+    <mesh name="burr_piece_0" file="pieces/burr_piece_0.obj"/>
+    <mesh name="burr_piece_1" file="pieces/burr_piece_1.obj"/>
+    <mesh name="burr_piece_2" file="pieces/burr_piece_2.obj"/>
+    <mesh name="burr_piece_3" file="pieces/burr_piece_3.obj"/>
+    <mesh name="burr_piece_4" file="pieces/burr_piece_4.obj"/>
+    <mesh name="burr_piece_5" file="pieces/burr_piece_5.obj"/>
+  </asset>
+
+  <default>
+    <geom friction="1 0.005 0.0001" density="500" solref="0.005 1" solimp="0.9 0.99 0.001"/>
+    <joint damping="1"/>
+  </default>
+
+  <worldbody>
+    <light directional="true" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2" dir="0 0 -1" pos="0 0 15"/>
+    <camera name="iso" mode="trackcom" pos="18 -24 14" xyaxes="1 0 0 0 0 1"/>
+    <geom name="ground" type="plane" size="100 100 1" rgba="0.85 0.85 0.85 1"/>
+
+    <!-- START_OFFSETS = [[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]] -->
+    <body name="piece0" pos="4 -8 1">
+      <freejoint/>
+      <geom name="g_piece0" type="mesh" mesh="burr_piece_0" rgba="1 0 0 1"/>
+    </body>
+
+    <body name="piece1" pos="-8 0 1">
+      <freejoint/>
+      <geom name="g_piece1" type="mesh" mesh="burr_piece_1" rgba="1 0.498 0 1"/>
+    </body>
+
+    <body name="piece2" pos="8 0 1">
+      <freejoint/>
+      <geom name="g_piece2" type="mesh" mesh="burr_piece_2" rgba="1 1 0 1"/>
+    </body>
+
+    <body name="piece3" pos="-4 8 3">
+      <freejoint/>
+      <geom name="g_piece3" type="mesh" mesh="burr_piece_3" rgba="0 1 0 1"/>
+    </body>
+
+    <body name="piece4" pos="-4 -8 3">
+      <freejoint/>
+      <geom name="g_piece4" type="mesh" mesh="burr_piece_4" rgba="0 0 1 1"/>
+    </body>
+
+    <body name="piece5" pos="4 8 1">
+      <freejoint/>
+      <geom name="g_piece5" type="mesh" mesh="burr_piece_5" rgba="1 0 1 1"/>
+    </body>
+  </worldbody>
+</mujoco>
