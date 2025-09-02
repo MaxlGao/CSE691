@@ -1,0 +1,201 @@
+<mujoco model="abb_yumi">
+  <!--
+    Simplified MuJoCo model of the ABB YuMi (IRB 14000) dual-arm collaborative robot.
+    Notes:
+      - This is an *approximation* intended for simulation, planning tests, and UI prototyping.
+      - Link dimensions, masses, inertias, and joint limits are conservative estimates.
+      - Geometry uses capsules/boxes/cylinders (no OEM meshes) to avoid licensing issues.
+      - Base is fixed to the world. Switch to a `freejoint` on body="base" if you need a floating base.
+
+    Coordinate Frames:
+      - World: +Z up, +X forward, +Y left (MuJoCo default when using coordinate="local").
+      - Arms are mounted on a small torso; the right arm is mirrored across the +X axis (using negative Y).
+
+    What to customize quickly:
+      - Joint limits (search "range=")
+      - Link sizes (capsule sizes)
+      - Mass/inertia (search for mass= and inertia=)
+      - Motor gains (in `actuator` section)
+  -->
+
+  <compiler angle="radian" coordinate="local" inertiafromgeom="true" discardvisual="false" />
+
+  <option gravity="0 0 -9.81" integrator="RK4" timestep="0.002" />
+
+  <size nuser_geom="2" />
+
+  <default>
+    <geom type="capsule" condim="4" friction="1.0 0.1 0.1" rgba="0.85 0.85 0.9 1" solref="0.002 1" solimp="0.9 0.9 0.01" />
+    <joint damping="0.1" armature="0.0005" limited="true" solreflimit="0.002 1" solimplimit="0.9 0.95 0.01" />
+    <motor ctrllimited="true" ctrlrange="-1 1" />
+  </default>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1="0.9 0.9 0.9" rgb2="0.8 0.8 0.8" />
+    <material name="mat_table" texture="grid" shininess="0.1" specular="0.2" rgba="0.9 0.9 0.9 1" />
+    <material name="mat_robot" rgba="0.2 0.2 0.25 1" />
+    <material name="mat_accent" rgba="0.1 0.4 0.9 1" />
+  <!-- Gripper meshes (scaled down even further) -->
+  <mesh name="left_gripper_mesh" file="pieces/gripper_arm_0.obj" scale="0.01 0.01 0.01" />
+  <mesh name="right_gripper_mesh" file="pieces/gripper_arm_1.obj" scale="0.01 0.01 0.01" />
+  </asset>
+
+  <worldbody>
+    <!-- Simple ground/table -->
+    <geom name="table" type="plane" size="2 2 0.02" material="mat_table" />
+
+    <!-- Fixed base/torso of YuMi -->
+    <body name="base" pos="0 0 0.1">
+      <geom name="base_geom" type="box" size="0.10 0.12 0.08" material="mat_robot" mass="6" />
+
+      <!-- Torso post -->
+      <body name="torso" pos="0 0 0.12">
+        <geom name="torso_geom" type="cylinder" size="0.065 0.10" material="mat_robot" mass="4" />
+
+        <!-- ================= Left Arm (7-DoF) ================= -->
+        <body name="left_shoulder_base" pos="0 0.12 0.06">
+          <!-- J1: Shoulder yaw (about +Z) -->
+          <joint name="l_j1" type="hinge" axis="0 0 1" range="-2.4 2.4" />
+          <geom name="l_shoulder_mount" type="box" size="0.05 0.04 0.04" material="mat_robot" mass="1.2" />
+
+          <body name="left_shoulder_roll" pos="0 0 0.0" euler="0 0 0">
+            <!-- J2: Shoulder roll (about +X) -->
+            <joint name="l_j2" type="hinge" axis="1 0 0" range="-2.0 2.0" />
+            <geom name="l_upper_arm_base" fromto="0 0 0  0.12 0 0" size="0.025" material="mat_robot" mass="1.0" />
+
+            <body name="left_shoulder_pitch" pos="0.12 0 0">
+              <!-- J3: Shoulder pitch (about +Y) -->
+              <joint name="l_j3" type="hinge" axis="0 1 0" range="-2.0 2.0" />
+              <geom name="l_upper_arm" fromto="0 0 0  0.14 0 0" size="0.022" material="mat_robot" mass="0.9" />
+
+              <body name="left_elbow" pos="0.14 0 0">
+                <!-- J4: Elbow pitch (about +Y) -->
+                <joint name="l_j4" type="hinge" axis="0 1 0" range="-2.2 2.2" />
+                <geom name="l_forearm" fromto="0 0 0  0.16 0 0" size="0.02" material="mat_robot" mass="0.8" />
+
+                <body name="left_wrist_roll" pos="0.16 0 0">
+                  <!-- J5: Wrist roll (about +X) -->
+                  <joint name="l_j5" type="hinge" axis="1 0 0" range="-2.4 2.4" />
+                  <geom name="l_wrist1" fromto="0 0 0  0.07 0 0" size="0.018" material="mat_robot" mass="0.5" />
+
+                  <body name="left_wrist_pitch" pos="0.07 0 0">
+                    <!-- J6: Wrist pitch (about +Y) -->
+                    <joint name="l_j6" type="hinge" axis="0 1 0" range="-2.4 2.4" />
+                    <geom name="l_wrist2" fromto="0 0 0  0.06 0 0" size="0.017" material="mat_robot" mass="0.4" />
+
+                    <body name="left_wrist_yaw" pos="0.06 0 0">
+                      <!-- J7: Wrist yaw (about +X) -->
+                      <joint name="l_j7" type="hinge" axis="1 0 0" range="-2.4 2.4" />
+                      <geom name="l_wrist3" type="capsule" fromto="0 0 0  0.05 0 0" size="0.016" material="mat_accent" mass="0.3" />
+
+                      <!-- End-effector site for left arm -->
+                      <!-- <site name="left_ee" pos="0.055 0 0" size="0.01" rgba="0 1 0 1" /> -->
+                      <!-- End-effector site for left arm -->
+                      <site name="left_ee" pos="0.05 0 0" size="0.01" rgba="0 1 0 1" />
+
+                      <!-- Left tool: mesh-based gripper attached at EE -->
+                      <body name="left_tool" pos="0.05 0 0">
+                        <!-- Rotate 90deg about Z to align mesh +Y with robot +X; tweak if needed -->
+                        <geom name="left_gripper_geom" type="mesh" mesh="left_gripper_mesh" material="mat_robot" pos="0 0 0" euler="0 0 1.5708" />
+                        <site name="left_grasp" pos="0.01 0 0" size="0.006" rgba="0 1 0 0.8"/>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+
+        <!-- ================= Right Arm (7-DoF, mirrored) ================= -->
+        <body name="right_shoulder_base" pos="0 -0.12 0.06">
+          <!-- J1: Shoulder yaw (about +Z) -->
+          <joint name="r_j1" type="hinge" axis="0 0 1" range="-2.4 2.4" />
+          <geom name="r_shoulder_mount" type="box" size="0.05 0.04 0.04" material="mat_robot" mass="1.2" />
+
+          <body name="right_shoulder_roll" pos="0 0 0.0">
+            <!-- J2: Shoulder roll (about +X) -->
+            <joint name="r_j2" type="hinge" axis="1 0 0" range="-2.0 2.0" />
+            <geom name="r_upper_arm_base" fromto="0 0 0  0.12 0 0" size="0.025" material="mat_robot" mass="1.0" />
+
+            <body name="right_shoulder_pitch" pos="0.12 0 0">
+              <!-- J3: Shoulder pitch (about +Y) -->
+              <joint name="r_j3" type="hinge" axis="0 1 0" range="-2.0 2.0" />
+              <geom name="r_upper_arm" fromto="0 0 0  0.14 0 0" size="0.022" material="mat_robot" mass="0.9" />
+
+              <body name="right_elbow" pos="0.14 0 0">
+                <!-- J4: Elbow pitch (about +Y) -->
+                <joint name="r_j4" type="hinge" axis="0 1 0" range="-2.2 2.2" />
+                <geom name="r_forearm" fromto="0 0 0  0.16 0 0" size="0.02" material="mat_robot" mass="0.8" />
+
+                <body name="right_wrist_roll" pos="0.16 0 0">
+                  <!-- J5: Wrist roll (about +X) -->
+                  <joint name="r_j5" type="hinge" axis="1 0 0" range="-2.4 2.4" />
+                  <geom name="r_wrist1" fromto="0 0 0  0.07 0 0" size="0.018" material="mat_robot" mass="0.5" />
+
+                  <body name="right_wrist_pitch" pos="0.07 0 0">
+                    <!-- J6: Wrist pitch (about +Y) -->
+                    <joint name="r_j6" type="hinge" axis="0 1 0" range="-2.4 2.4" />
+                    <geom name="r_wrist2" fromto="0 0 0  0.06 0 0" size="0.017" material="mat_robot" mass="0.4" />
+
+                    <body name="right_wrist_yaw" pos="0.06 0 0">
+                      <!-- J7: Wrist yaw (about +X) -->
+                      <joint name="r_j7" type="hinge" axis="1 0 0" range="-2.4 2.4" />
+                      <geom name="r_wrist3" type="capsule" fromto="0 0 0  0.05 0 0" size="0.016" material="mat_accent" mass="0.3" />
+
+                      <!-- End-effector site for right arm -->
+                      <!-- <site name="right_ee" pos="0.055 0 0" size="0.01" rgba="0 0 1 1" /> -->
+                      <!-- End-effector site for right arm -->
+                      <site name="right_ee" pos="0.05 0 0" size="0.01" rgba="0 0 1 1" />
+
+                      <!-- Right tool: mesh-based gripper attached at EE -->
+                      <body name="right_tool" pos="0.05 0 0">
+                        <!-- Rotate 90deg about Z to align mesh +Y with robot +X; tweak if needed -->
+                        <geom name="right_gripper_geom" type="mesh" mesh="right_gripper_mesh" material="mat_robot" pos="0 0 0" euler="0 0 1.5708" />
+                        <site name="right_grasp" pos="0.01 0 0" size="0.006" rgba="0 0 1 0.8"/>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+
+      </body>
+    </body>
+
+  </worldbody>
+
+  <!-- ================= Actuators ================= -->
+  <actuator>
+    <!-- Left arm motors (torque-scaled velocity actuators). Adjust gear for torque/velocity mapping. -->
+    <motor name="l_m1" joint="l_j1" gear="60" />
+    <motor name="l_m2" joint="l_j2" gear="60" />
+    <motor name="l_m3" joint="l_j3" gear="60" />
+    <motor name="l_m4" joint="l_j4" gear="60" />
+    <motor name="l_m5" joint="l_j5" gear="50" />
+    <motor name="l_m6" joint="l_j6" gear="50" />
+    <motor name="l_m7" joint="l_j7" gear="40" />
+
+    <!-- Right arm motors -->
+    <motor name="r_m1" joint="r_j1" gear="60" />
+    <motor name="r_m2" joint="r_j2" gear="60" />
+    <motor name="r_m3" joint="r_j3" gear="60" />
+    <motor name="r_m4" joint="r_j4" gear="60" />
+    <motor name="r_m5" joint="r_j5" gear="50" />
+    <motor name="r_m6" joint="r_j6" gear="50" />
+    <motor name="r_m7" joint="r_j7" gear="40" />
+
+  <!-- Mesh grippers are passive (no finger joints). Add actuators if you later include finger DOFs. -->
+  </actuator>
+
+  <!-- ================= Sensors (optional) ================= -->
+  <sensor>
+    <jointpos name="l_q" joint="l_j1" />
+    <jointpos name="r_q" joint="r_j1" />
+    <framepos name="left_ee_pos" objtype="site" objname="left_ee" />
+    <framepos name="right_ee_pos" objtype="site" objname="right_ee" />
+  </sensor>
+
+</mujoco>
