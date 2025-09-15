@@ -12,3 +12,5 @@ main_trimesh_shorter copy.py
 temp.py
 visualize_final.py
 /__pycache__/
+Mujoco/__pycache__
+Mujoco/cache/
