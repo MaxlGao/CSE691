@@ -14,3 +14,4 @@ visualize_final.py
 /__pycache__/
 Mujoco/__pycache__
 Mujoco/cache/
+Mujoco/results/
