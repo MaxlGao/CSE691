@@ -2,12 +2,13 @@ import trimesh
 import numpy as np
 from helper_burr_reference import BURR_DICT_EASY, BURR_DICT_HARD
 
-BURR_DICT = BURR_DICT_HARD
+BURR_DICT = BURR_DICT_EASY
 boxes = BURR_DICT["boxes"]
 bad_corners = BURR_DICT["bad_corners"]
 target_offsets = BURR_DICT["target_offsets"]
 initial_offsets = BURR_DICT["initial_offsets"]
 floor_offsets_corners = BURR_DICT["floor_offsets_corners"]
+gripper_configs = BURR_DICT["gripper_configs"]
 
 REFERENCE_INDEX_OFFSET = 50 # Bump up reference piece indices
 FLOOR_INDEX_OFFSET = 100 # Bump up floor piece index
@@ -15,23 +16,6 @@ FLOOR_INDEX_OFFSET = 100 # Bump up floor piece index
 def trirotmat(angledeg, direction):
     return trimesh.transformations.rotation_matrix(angle=np.radians(angledeg), direction=direction, point=[0, 0, 0])
 
-# GRIPPER_CONFIGS = [ # Width, Active, Position, Rotation
-#     {'width': 2, 'active': False, 'position': [ 3,  0, 1], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat(-135, [0, 0, 1])},
-#     {'width': 6, 'active': False, 'position': [-1,  0, 1], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat( -45, [0, 0, 1])},
-#     {'width': 6, 'active': False, 'position': [ 1,  0, 1], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat(-135, [0, 0, 1])},
-#     {'width': 2, 'active': False, 'position': [ 0,  1, 3], 'rotation': trirotmat(90, [0, 1, 0]) @ trirotmat( -45, [0, 0, 1])},
-#     {'width': 2, 'active': False, 'position': [ 0, -1, 3], 'rotation': trirotmat(90, [0, 1, 0]) @ trirotmat(  45, [0, 0, 1])},
-#     {'width': 2, 'active': False, 'position': [ 3,  0, 0], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat( 180, [0, 0, 1])}
-# ]
-
-GRIPPER_CONFIGS = [ # Width, Active, Position, Rotation
-    {'width': 6, 'active': False, 'position': [ 1,  0, 1], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat(-135, [0, 0, 1])},
-    {'width': 2, 'active': False, 'position': [ 0,  1, 3], 'rotation': trirotmat(90, [0, 1, 0]) @ trirotmat( -45, [0, 0, 1])},
-    {'width': 2, 'active': False, 'position': [ 3,  0, 0], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat( 180, [0, 0, 1])},
-    {'width': 2, 'active': False, 'position': [ 3,  0, 1], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat(-135, [0, 0, 1])},
-    {'width': 2, 'active': False, 'position': [ 0, -1, 3], 'rotation': trirotmat(90, [0, 1, 0]) @ trirotmat(  45, [0, 0, 1])},
-    {'width': 6, 'active': False, 'position': [-1,  0, 1], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat( -45, [0, 0, 1])}
-]
 
 # Creation Functions
 def find_cube_corners(mesh, tol=1e-6):
@@ -96,7 +80,7 @@ def create_floor(reverse=False):
                    (4,[-1,-2,0]), (5,[1,-2,0])] 
     return {'mesh': floor, 'corners': corners, 'gripper_config': None, 'id': FLOOR_INDEX_OFFSET}
 
-def create_burr_piece(blocks, color, idx, reference=False, gripper=None):
+def create_burr_piece(blocks, color, idx, reverse, reference=False, gripper=None):
     """
     Create a Burr piece from a list of block specs.
     Each block is a dict: {'size': [x, y, z], 'position': [x, y, z]}
@@ -119,10 +103,11 @@ def create_burr_piece(blocks, color, idx, reference=False, gripper=None):
     corners = find_cube_corners(composite)
     bad_cids = bad_corners.get(idx, set())
     filtered_corners = [(cid, pos) for cid, pos in corners if cid not in bad_cids]
+    target = initial_offsets[idx] if reverse else target_offsets[idx]
     if reference:
         gripper = None
         idx += REFERENCE_INDEX_OFFSET
-    return {'mesh': composite, 'corners': filtered_corners, 'gripper_config': gripper, 'id': idx}
+    return {'mesh': composite, 'corners': filtered_corners, 'gripper_config': gripper, 'target': target, 'id': idx}
 
 def create_gripper(config=None, color=[127, 127, 127, 255]):
     if config is None:
@@ -156,7 +141,7 @@ def create_gripper(config=None, color=[127, 127, 127, 255]):
         gripper.apply_translation(config['position'])
     return gripper
 
-def define_all_burr_pieces(boxes=boxes, offsets=None, reference=False):
+def define_all_burr_pieces(boxes=boxes, offsets=None, reference=False, reverse=False):
     """
     Returns a list of dicts: {'mesh': trimesh.Trimesh, 'corners': list of (index, position)}
     """
@@ -176,11 +161,12 @@ def define_all_burr_pieces(boxes=boxes, offsets=None, reference=False):
     pieces = []
 
     for i in range(6):
-        pieces.append(create_burr_piece(boxes[i], colors[i], i, reference=reference, gripper=GRIPPER_CONFIGS[i]))
+        pieces.append(create_burr_piece(boxes[i], colors[i], i, reverse, reference=reference, gripper=gripper_configs[i]))
 
-    if offsets is not None:
-        for piece in pieces:
-            piece = move_piece(piece, offsets[piece['id']])
+    if offsets is None: # If not hard-defined
+        offsets = BURR_DICT['target_offsets'] if reverse else BURR_DICT['initial_offsets']
+    for piece in pieces:
+        piece = move_piece(piece, offsets[piece['id']])
     return pieces
 
 def move_piece(piece, translation):

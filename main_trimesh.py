@@ -1,239 +1,25 @@
 import numpy as np
 import time
-import copy
-import concurrent.futures
-from tqdm import tqdm
+import contextvars
 from pathlib import Path
 import re
-from helper_burr_piece_creator import create_floor, define_all_burr_pieces, FLOOR_INDEX_OFFSET, BURR_DICT
-from helper_geometric_functions import check_path_clear, get_feasible_motions,\
-get_valid_mates, move_piece, get_unsupported_pids
-from helper_display import compile_gif, show_and_save_frames, display_pieces
+from helper_burr_piece_creator import create_floor, define_all_burr_pieces, FLOOR_INDEX_OFFSET
+from helper_geometric_functions import get_valid_mates, move_piece, set_mates_list
+from helper_display import compile_gif, show_and_save_frames
 from helper_file_mgmt import load_mates_list, load_simulation_state, save_mates_list, save_simulation_state
+from helper_dynamic_programming import cost_function, get_moves_scored_lookahead
 from datetime import datetime
 
 # Nomenclature
-# Scored Move = (Scores, Move) 
-#             = (Scores, (Mate[0], Mate[1], Translation)) 
-#             = ([Score 0, Score 1, ..., Rollout Score]], ((pid1, cid1), (pid2, cid2), Translation))
+# Scored Move = {scores, mate, pids, translation}
+#             = {[score 0, score 1, ..., Rollout score], ((pid1, cid1), (pid2, cid2)), pids, translation}
 # Move Sequence = (Scores, Moves)
 # Pieces = [Piece, ..., Piece] 
-#        = [{Mesh, Corners, ID}, ..., Piece]
-#        = [{Mesh, (ID, World Position), ID}, ..., Piece]
+#        = [{Mesh, Corners, ID, Gripper}, ..., Piece]
+#        = [{Mesh, (ID, World Position), ID, Gripper}, ..., Piece]
 
 np.set_printoptions(formatter={'int': '{:2d}'.format})
 NUM_PIECES = 6
-
-# Dynamic Programming Functions
-def get_top_k_scored_moves(pieces, active_pids, target_offsets, k=float("inf"), mates_list=None, max_held=6, prev_piece_and_vec=None):
-    if prev_piece_and_vec is not None:
-        prev_pid, prev_vec = prev_piece_and_vec
-    else:
-        prev_pid, prev_vec = -1, 0
-
-    # First get a headcount of who's unsupported, except the floor
-    pieces_not_floor = [piece for piece in pieces if piece['id'] != FLOOR_INDEX_OFFSET]
-    unsupported_ids = get_unsupported_pids(pieces_not_floor)
-    for piece in pieces_not_floor:
-        piece['gripper_config'][1] = False
-    for id in unsupported_ids:
-        piece = pieces[id]
-        piece['gripper_config'][1] = True # Activate gripper for unsupported pieces
-    # If we're at the limit, only these unsupported pieces can get moved. Otherwise, carry on.
-    movable_ids = [i for i in range(NUM_PIECES)]
-    if len(unsupported_ids) >= max_held:
-        movable_ids = unsupported_ids
-    
-    # Second, quickly make a broad list of semi-verified moves, not checking for intermediate collision
-    unverified = []
-    unverified_counts = []
-    active_pieces = [piece for piece in pieces if piece['id'] in active_pids]
-    for id in movable_ids:
-        piece = [piece for piece in pieces if piece['id'] == id][0]
-        new_unverified = get_feasible_motions(piece, active_pieces, mates_list, steps=1, check_path=False)
-        unverified = unverified + new_unverified
-        unverified_counts.append(len(new_unverified))
-
-    # Then sort by score. 
-    unverified_scored_moves = []
-    for (pid1, cid1), (pid2, cid2), vec in unverified:
-        if np.linalg.norm(vec) <= 0.01:
-            continue # Don't collect null moves
-        if pid1 == prev_pid and np.linalg.norm(vec + prev_vec) <= 0.01:
-            continue # Don't reverse the previous move
-        cost_change = get_cost_change(pieces[pid1], vec, target_offsets[pid1])
-        unverified_scored_moves.append((cost_change, ((pid1, cid1), (pid2, cid2), vec)))
-    unverified_scored_moves.sort(key=lambda x: x[0])
-
-    # Then check feasibility until you get your quota. (or run out of feasible moves)
-    feasible_scored_moves = []
-    for scored_move in unverified_scored_moves:
-        _, ((pid1, _), (_, _), vec) = scored_move
-        this_piece = pieces[pid1]
-        test_mesh = this_piece['mesh'].copy()
-        other_pieces = [piece for piece in active_pieces if piece['id'] != pid1]
-        other_meshes = [piece['mesh'] for piece in other_pieces]
-        if check_path_clear(test_mesh, other_meshes, vec, 20):
-            # If removing THIS piece leads to 2+ unsupported pieces, it won't work. 
-            if len(get_unsupported_pids(other_pieces)) >= max_held:
-                continue
-            feasible_scored_moves.append(scored_move)
-            if pid1 != 1:
-                pass
-            if len(feasible_scored_moves) == k:
-                break
-    k = min(len(feasible_scored_moves), k)
-    return feasible_scored_moves
-
-def get_moves_scored_lookahead(pieces, active_pids, target_offsets, mates_list=None, top_k=[float("inf")], rollout_depth=2, prev_piece_and_vec=None):
-    print("\n\nGetting primary moves...")
-    top_scored_moves = get_top_k_scored_moves(pieces, active_pids, target_offsets, k=top_k[0], mates_list=mates_list, prev_piece_and_vec=prev_piece_and_vec)
-    print(f"| Looking Ahead from top {len(top_scored_moves)} moves...")
-
-    branches, remaining_top_k = generate_unrolled_branches(pieces, active_pids, target_offsets, mates_list, top_k, prev_piece_and_vec)
-    print(f"| Unrolled to get {len(branches)} moves...")
-    # args_list = [
-    #     (scored_move, pieces, active_pids, target_offsets, mates_list, rollout_depth, top_k[1:], prev_piece_and_vec)
-    #     for scored_move in top_scored_moves
-    # ]
-    args_list = [
-        (path, temp_pieces, temp_active_pids, target_offsets, mates_list, rollout_depth, remaining_top_k, prev_piece_and_vec)
-        for path, temp_pieces, temp_active_pids in branches
-    ]
-    path_list = []
-    total_moves_compared = 0
-    # for i, move in tqdm(enumerate(branches), total=len(branches), ncols=100, desc='| '):
-    #     result = execute_lookahead_recursive(*args_list[i])
-    #     path, num_moves = result
-    #     path_list.append(path)
-    #     total_moves_compared += num_moves
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        futures = [executor.submit(execute_lookahead_recursive, *args) for args in args_list]
-        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), ncols=100, desc='| '):
-            result = future.result()
-            path, num_moves = result
-            path_list.append(path)
-            total_moves_compared += num_moves
-
-    # Break ties by picking the best immediate move
-    presorted_paths = sorted(path_list, key=lambda x: x[0][0]) 
-    postsorted_paths = sorted(presorted_paths, key=lambda x: np.trunc(sum([move[0] for move in x])*1e7))
-    return postsorted_paths, total_moves_compared
-
-def generate_unrolled_branches(pieces, active_pids, target_offsets, mates_list, top_k, prev_piece_and_vec, min_branches=50):
-    # def get_queue(queue):
-    #     new_queue = []
-    #     for path, temp_pieces, temp_active_pids in queue:
-    #         moves = get_top_k_scored_moves(temp_pieces, temp_active_pids, target_offsets, k=top_k[level], mates_list=mates_list, prev_piece_and_vec=prev_piece_and_vec)
-    #         for move in moves:
-    #             primary_cost, ((pid1, cid1), (pid2, cid2), vec) = move
-    #             new_piece = move_piece(copy.deepcopy(temp_pieces[pid1]), vec)
-    #             new_pieces = copy.deepcopy(temp_pieces)
-    #             new_pieces[pid1] = new_piece
-    #             new_active_pids = temp_active_pids + [new_piece['id']] if new_piece['id'] not in temp_active_pids else temp_active_pids
-    #             new_queue.append((path + [move], new_pieces, new_active_pids))
-    #     return new_queue
-    
-    
-    queue = [([], pieces, active_pids)]
-    level = 0
-    while len(queue) < min_branches and level < len(top_k):
-        new_queue = []
-        for path, temp_pieces, temp_active_pids in queue:
-            moves = get_top_k_scored_moves(temp_pieces, temp_active_pids, target_offsets, k=top_k[level], mates_list=mates_list, prev_piece_and_vec=prev_piece_and_vec)
-            for move in moves:
-                primary_cost, ((pid1, cid1), (pid2, cid2), vec) = move
-                new_piece = move_piece(copy.deepcopy(temp_pieces[pid1]), vec)
-                new_pieces = copy.deepcopy(temp_pieces)
-                new_pieces[pid1] = new_piece
-                new_active_pids = temp_active_pids + [new_piece['id']] if new_piece['id'] not in temp_active_pids else temp_active_pids
-                new_queue.append((path + [move], new_pieces, new_active_pids))
-        queue = new_queue
-        level += 1
-        print(f"| Unrolling... Got {len(queue)} paths")
-    return queue, top_k[level:]
-
-def execute_lookahead_recursive(path, pieces, active_pids, target_offsets, mates_list, rollout_depth, top_k_remaining, prev_piece_and_vec):
-    """
-    Recursive function that searches for the highest scoring future path, given a present one.
-    Returns the augmented path and a count of all the children searched. 
-    """
-    # primary_cost, ((pid1, cid1), (pid2, cid2), vec) = scored_move
-
-    # # Build a virtual assembly according to scored_move
-    # temp_piece = move_piece(copy.deepcopy(pieces[pid1]), vec)
-    # temp_pieces = copy.deepcopy(pieces)
-    # temp_pieces[pid1] = temp_piece
-    # temp_active_pids = active_pids + [temp_piece['id']] if temp_piece['id'] not in active_pids else active_pids
-    scores = []
-    for move in path:
-        score, _ = move[0], move[1]
-        scores.append(score)
-
-    # Recurse or Rollout
-    # if not top_k_remaining:
-    #     future_cost = greedy_rollout_score(temp_pieces, temp_active_pids, target_offsets, mates_list, depth=rollout_depth)
-    #     future_cost_r = np.round(future_cost, 9)
-    #     total_scores = [primary_cost] + [future_cost_r]
-    #     return (total_scores, ((pid1, cid1), (pid2, cid2), vec)), 1
-
-    if not top_k_remaining:
-        rollout_score = greedy_rollout_score(pieces, active_pids, target_offsets, mates_list, depth=rollout_depth)
-        path += [(np.round(rollout_score, 9), [])]
-        return path, 1
-
-    next_k = top_k_remaining[0]
-    next_moves = get_top_k_scored_moves(pieces, active_pids, target_offsets, k=next_k, mates_list=mates_list, prev_piece_and_vec=prev_piece_and_vec)
-    
-    path_list = []
-    num_children = 0
-    for move in next_moves:
-        new_path = path + [move]
-        new_path, num_child = execute_lookahead_recursive(new_path, pieces, active_pids, target_offsets, mates_list, rollout_depth, top_k_remaining[1:], prev_piece_and_vec)
-        num_children += num_child
-        path_list.append(new_path)
-
-    # Choose best path
-    # Break ties by picking the best immediate move
-    presorted_paths = sorted(path_list, key=lambda x: x[0][0]) 
-    postsorted_paths = sorted(presorted_paths, key=lambda x: np.trunc(sum([move[0] for move in x])*1e7))
-    best_path = postsorted_paths[0]
-    return best_path, num_children
-
-def greedy_rollout_score(pieces, active_pids, target_offsets, mates_list, depth=2):
-    if depth == 0:
-        return 0
-
-    best_cost = float("inf")
-
-    best_move = get_top_k_scored_moves(pieces, active_pids, target_offsets, k=1, mates_list=mates_list)
-    best_cost, ((best_pid, _), (_, _), best_vec) = best_move[0]
-    if best_move is None or best_cost >= 0:
-        return 0  # No valid move or best greedy move is no move at all.
-
-    # Execute best move
-    temp_piece = move_piece(copy.deepcopy(pieces[best_pid]), best_vec)
-    temp_pieces = copy.deepcopy(pieces)
-    temp_pieces[best_pid] = temp_piece
-    new_active_pids = active_pids + [temp_piece['id']] if temp_piece['id'] not in active_pids else active_pids
-
-    return best_cost + greedy_rollout_score(temp_pieces, new_active_pids, target_offsets, mates_list, depth=depth-1)
-
-def cost_function(pieces, target_offsets):
-    offsets = [piece['mesh'].bounding_box.centroid for piece in pieces]
-    diff = offsets - target_offsets
-    dist = [np.linalg.norm(dif) for dif in diff]
-    return sum(dist)
-
-def get_cost_change(piece, translation, target_offset):
-    current_location = piece['mesh'].bounding_box.centroid
-    current_cost = np.linalg.norm(current_location - target_offset)
-    new_location = current_location + translation
-    new_cost = np.linalg.norm(new_location - target_offset)
-    diff_cost = new_cost - current_cost
-    diff_cost += 0.001 # Constant cost to encourage fewer moves (and break ties)
-    return np.round(diff_cost, 9)
-
 
 # Top-Level Scripts
 def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=None, folder='results', reverse=False):
@@ -242,8 +28,6 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
     step_files = sorted(sim_folder.glob('step_*.pkl'))
     step_indices = sorted([int(re.search(r'step_(\d+)\.pkl', f.name).group(1)) for f in step_files])
     latest_step = step_indices[-1] if step_indices else None
-    target_offsets = BURR_DICT['initial_offsets'] if reverse else BURR_DICT['target_offsets']
-    initial_offsets = BURR_DICT['target_offsets'] if reverse else BURR_DICT['initial_offsets']
     prev_piece_and_vec = None
 
     def print_best_move_info(path_list, scored_moves=[]):
@@ -253,7 +37,7 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
             score_list_list = []
             for i, path in enumerate(path_list):
                 score_list = [move[0] for move in path]
-                move_list = [move[1][:2] for move in path]
+                # move_list = [move[1][:2] for move in path]
                 # print(f"Route # {i}, {move_list}")
                 score_list_list.append(score_list)
             scored_moves = [(score_list, first_move) for score_list, first_move in zip(score_list_list, first_moves)]
@@ -273,13 +57,13 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
     if latest_step is None:
         # Create Floor and Real Pieces. The floor is a static base piece. 
         floor = create_floor(reverse=reverse)
-        pieces = define_all_burr_pieces(offsets=initial_offsets)
+        pieces = define_all_burr_pieces(reverse=reverse)
         if reverse:
             active_pids = [i for i in range(NUM_PIECES)] + [FLOOR_INDEX_OFFSET]
         else:
             active_pids = [FLOOR_INDEX_OFFSET]
         pieces_augmented = pieces + [floor]
-        print(f"Initial Cost Measure: {cost_function(pieces, target_offsets):.2f}")
+        print(f"Initial Cost Measure: {cost_function(pieces):.2f}")
         start_from = 0
     else:
         if start_from is None or start_from > latest_step:
@@ -300,11 +84,15 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
         best_pid, best_vec, _ = print_best_move_info([], scored_moves=scored_moves)
 
         moved_piece = move_piece(pieces[best_pid], best_vec)
-        moved_piece['gripper_config'][1] = True # Activate gripper for moved piece
+        moved_piece['gripper_config']['active'] = True # Activate gripper for moved piece
         active_pids = active_pids + [best_pid] if best_pid not in active_pids else active_pids
+        if reverse:
+            if np.linalg.norm(moved_piece['mesh'].bounding_box.centroid - moved_piece['target']) <= 0.01:
+                active_pids.remove(best_pid)
+                print(f"Retiring Piece {best_pid}; active Pieces now {active_pids}")
         print(f"→ Fast-Finished {start_from+1} / {n_stages}.")
 
-        if cost_function(pieces, target_offsets) < 0.1:
+        if cost_function(pieces) < 0.1:
             save_simulation_state(start_from+1, pieces_augmented, active_pids, [], folder=folder)
             return # If we're at zero cost, we're done.
         start_from += 1
@@ -314,10 +102,19 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
     if mates_list is None:
         mates_list = get_valid_mates(pieces, floor)
         save_mates_list(mates_list, reverse=reverse)
+    mates_contextvar = contextvars.ContextVar("mates_list")
+    mates_contextvar.set(mates_list)
+    set_mates_list(mates_contextvar)
 
     for stage in range(start_from, n_stages):
         start_time = time.time()
-        path_list, moves_compared = get_moves_scored_lookahead(pieces_augmented, active_pids, target_offsets, mates_list, top_k=top_k, rollout_depth=rollout_depth, prev_piece_and_vec=prev_piece_and_vec)
+        # Defining the assembly object
+        assembly = {
+            "active_pids": active_pids,
+            "prev_piece_and_vec": prev_piece_and_vec,
+            "reverse": reverse
+        }
+        path_list, moves_compared = get_moves_scored_lookahead(pieces_augmented, assembly, top_k=top_k, rollout_depth=rollout_depth)
         # scored_moves
         print(f"| | Processed {moves_compared} moves.")
         
@@ -334,11 +131,15 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
         moved_piece = pieces[best_pid]
         moved_piece = move_piece(moved_piece, best_vec)
         prev_piece_and_vec = (best_pid, best_vec)
-        moved_piece['gripper_config'][1] = True # Activate gripper for moved piece
+        moved_piece['gripper_config']['active'] = True # Activate gripper for moved piece
         active_pids = active_pids + [best_pid] if best_pid not in active_pids else active_pids
+        if reverse:
+            if np.linalg.norm(moved_piece['mesh'].bounding_box.centroid - moved_piece['target']) <= 0.01:
+                active_pids.remove(best_pid)
+                print(f"Retiring Piece {best_pid}; active Pieces now {active_pids}")
         print(f"→ Done with Stage {stage+1} / {n_stages}. This took {time.time() - start_time:.2f} seconds.")
 
-        if cost_function(pieces, target_offsets) < 0.1:
+        if cost_function(pieces) < 0.1:
             save_simulation_state(stage+1, pieces_augmented, active_pids, [], folder=folder)
             return # If we're at zero cost, we're done.
     return
@@ -346,18 +147,18 @@ def run_assembler(n_stages=16,top_k=[float("inf")], rollout_depth=0, start_from=
 if __name__=="__main__":
     reverse = True # Reverse lets you do Assembly by disassembly, which is much faster. 
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    # folder = f"results/{timestamp}"
-    folder = f"results/2025-05-03_18-10-44" # Existing folder
+    folder = f"results/{timestamp}"
+    folder = f"results/2025-08-06_15-05-47" # Existing folder
     folder_sim = f"{folder}/states"
     folder_img = f"{folder}/frames"
 
     start_time = time.time()
-    # run_assembler(n_stages=30, top_k=[4, 4, 4, 4, 3, 3, 3], rollout_depth=1, folder=folder_sim, reverse=reverse)
+    run_assembler(n_stages=30, top_k=[100, 10], rollout_depth=1, folder=folder_sim, reverse=reverse, start_from=14)
     print(f"Planning took {time.time() - start_time:4f} seconds")
 
     # Visualize and save frames. Hold=True lets you drag around the scene
-    show_and_save_frames(folder_sim, folder_img, hold=False, reverse=reverse, steps=20, start_from=12)
+    # show_and_save_frames(folder_sim, folder_img, hold=False, reverse=reverse, steps=20, start_from=13)
 
-    compile_gif(folder=folder_img, reverse=False, fps=20)
-    compile_gif(folder=folder_img, reverse=True, fps=20)
+    # compile_gif(folder=folder_img, reverse=False, fps=20)
+    # compile_gif(folder=folder_img, reverse=True, fps=20)
     print(f"This script took {time.time() - start_time:4f} seconds")

@@ -17,6 +17,24 @@ def transform_boxes(boxes, matrix):
         })
     return transformed
 
+GRIPPER_CONFIGS_EASY = [ # Width, Active, Position, Rotation
+    {'width': 2, 'active': False, 'position': [ 3,  0, 1], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat(-135, [0, 0, 1])},
+    {'width': 6, 'active': False, 'position': [-1,  0, 1], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat( -45, [0, 0, 1])},
+    {'width': 6, 'active': False, 'position': [ 1,  0, 1], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat(-135, [0, 0, 1])},
+    {'width': 2, 'active': False, 'position': [ 0,  1, 3], 'rotation': trirotmat(90, [0, 1, 0]) @ trirotmat( -45, [0, 0, 1])},
+    {'width': 2, 'active': False, 'position': [ 0, -1, 3], 'rotation': trirotmat(90, [0, 1, 0]) @ trirotmat(  45, [0, 0, 1])},
+    {'width': 2, 'active': False, 'position': [ 3,  0, 0], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat( 180, [0, 0, 1])}
+]
+
+GRIPPER_CONFIGS_HARD = [ # Width, Active, Position, Rotation
+    {'width': 6, 'active': False, 'position': [ 1,  0, 1], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat(-135, [0, 0, 1])},
+    {'width': 2, 'active': False, 'position': [ 0,  1, 3], 'rotation': trirotmat(90, [0, 1, 0]) @ trirotmat( -45, [0, 0, 1])},
+    {'width': 2, 'active': False, 'position': [ 3,  0, 0], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat( 180, [0, 0, 1])},
+    {'width': 2, 'active': False, 'position': [ 3,  0, 1], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat(-135, [0, 0, 1])},
+    {'width': 2, 'active': False, 'position': [ 0, -1, 3], 'rotation': trirotmat(90, [0, 1, 0]) @ trirotmat(  45, [0, 0, 1])},
+    {'width': 6, 'active': False, 'position': [-1,  0, 1], 'rotation': trirotmat(90, [1, 0, 0]) @ trirotmat( -45, [0, 0, 1])}
+]
+
 BURR_DICT_EASY = {
     "boxes": [ # Easy boxes are already oriented correctly
         [
@@ -67,7 +85,8 @@ BURR_DICT_EASY = {
     },
     "target_offsets": np.array([[0,0,4],[-1,0,3],[1,0,3],[0,1,3],[0,-1,3],[0,0,2]]),
     "initial_offsets": np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]]),
-    "initial_offsets_corners": np.array([[1,-9,0],[-9,-3,0],[7,-3,0],[-5,7,0],[-5,-9,0],[1,7,0]])
+    "floor_offsets_corners": np.array([[1,-9,0],[-9,-3,0],[7,-3,0],[-5,7,0],[-5,-9,0],[1,7,0]]),
+    "gripper_configs": GRIPPER_CONFIGS_EASY
 }
 
 # From here, assume base piece orientation is like this:
@@ -155,5 +174,6 @@ BURR_DICT_HARD = {
     "bad_corners": {},
     "target_offsets": np.array(translations_hard),
     "initial_offsets": np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]]),
-    "floor_offsets_corners": np.array([[1,-9,0],[-9,-3,0],[7,-3,0],[-5,7,0],[-5,-9,0],[1,7,0]])
+    "floor_offsets_corners": np.array([[1,-9,0],[-9,-3,0],[7,-3,0],[-5,7,0],[-5,-9,0],[1,7,0]]),
+    "gripper_configs": GRIPPER_CONFIGS_HARD
 }

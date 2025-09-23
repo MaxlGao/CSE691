@@ -3,9 +3,14 @@ import numpy as np
 import time
 import copy
 from shapely.geometry import Point, Polygon
-from helper_burr_piece_creator import create_gripper, FLOOR_INDEX_OFFSET, GRIPPER_CONFIGS
+from helper_burr_piece_creator import create_gripper, FLOOR_INDEX_OFFSET
 
 DOWN = np.array([0,0,-1])
+
+_mates_list = None
+def set_mates_list(mates_list):
+    global _mates_list
+    _mates_list = mates_list
 
 # Geometry Functions
 def check_path_clear(this_mesh, other_meshes, translation, steps=20, tol=0.01, floor_active=True):
@@ -47,7 +52,7 @@ def check_path_clear(this_mesh, other_meshes, translation, steps=20, tol=0.01, f
 
     return True  # No collision detected along the entire path
 
-def get_feasible_motions(this_piece, pieces, mates_list=None, steps=20, check_path=True):
+def get_feasible_motions(this_piece, pieces, steps=20, check_path=True):
     """
     Compute feasible, unique linear motions from `this_piece` to any other in `pieces`.
 
@@ -78,7 +83,8 @@ def get_feasible_motions(this_piece, pieces, mates_list=None, steps=20, check_pa
     # Restricted motions in (+x, -x, +y, -y, +z, -z)
     restricted = [False, False, False, False, False, False]
         
-    if mates_list is not None:
+    if _mates_list is not None:
+        mates_list = _mates_list.get()
         mates_list = [mate for mate in mates_list if mate[0][0] == this_pid] # Mates pertaining to this piece
         # Match corners to actual positions
         this_corner_dict = {cid: pos for cid, pos in this_corners}
@@ -90,14 +96,15 @@ def get_feasible_motions(this_piece, pieces, mates_list=None, steps=20, check_pa
             if pid2 in available_pieces
         ]
         # Rule: You cannot move in (.., .., +x) if you cannot move in (0, 0, +x), etc
-        dd = 0.25
-        test_vecs = np.array([[dd, 0, 0], [-dd, 0, 0],
-                              [0, dd, 0], [0, -dd, 0],
-                              [0, 0, dd], [0, 0, -dd]])
-        for i, test_vec in enumerate(test_vecs):
-            test_mesh = this_mesh.copy()
-            if not check_path_clear(test_mesh, other_meshes, test_vec, 1):
-                restricted[i] = True
+        # Completely irrelevant for non cubic assemblies, so I have to nix this.
+        # dd = 0.25
+        # test_vecs = np.array([[dd, 0, 0], [-dd, 0, 0],
+        #                       [0, dd, 0], [0, -dd, 0],
+        #                       [0, 0, dd], [0, 0, -dd]])
+        # for i, test_vec in enumerate(test_vecs):
+        #     test_mesh = this_mesh.copy()
+        #     if not check_path_clear(test_mesh, other_meshes, test_vec, 1):
+        #         restricted[i] = True
     else:
         combinations = []
         for cid1, pos1 in this_corners:
@@ -234,12 +241,38 @@ def is_supported(this_mesh, other_meshes):
     #     scene.show()
     return polygon.contains(Point(CoM_xy)) # If contains, return True
 
+def who_supports(this_mesh, other_meshes, floor_mesh):
+    """Returns list of meshes as contributing to this_mesh's bottom support. Really just those who intersect at the bottom."""
+    mesh_list = []
+    # Quick check to see if this mesh is on the floor
+    this_bbox = this_mesh.bounds
+    if this_bbox[0][2] == 0: # Lower bound Z is zero
+        mesh_list.append(floor_mesh)
+
+    offset = 0.01 * DOWN
+    translated = this_mesh.copy()
+    translated.apply_translation(offset)
+
+    for other_mesh in other_meshes:
+        intersect = trimesh.boolean.intersection([translated, other_mesh], check_volume=False)
+        if not intersect.is_empty and intersect.volume > 0.001:
+            mesh_list.append(other_mesh)
+    return mesh_list
+
 def move_piece(piece, translation):
     piece['mesh'].apply_translation(translation)
     piece['corners'] = [(cid, pos+translation) for cid,pos in piece['corners']]
     if piece['gripper_config'] is not None:
         piece['gripper_config']['position'] = piece['gripper_config']['position'] + translation
     return piece
+
+def move_pieces(pieces, translation):
+    for piece in pieces:
+        piece['mesh'].apply_translation(translation)
+        piece['corners'] = [(cid, pos+translation) for cid,pos in piece['corners']]
+        if piece['gripper_config'] is not None:
+            piece['gripper_config']['position'] = piece['gripper_config']['position'] + translation
+    return pieces
 
 # Alt form of move_piece
 def apply_mate(pieces, mate):
