@@ -16,18 +16,12 @@ import pyglet
 from functools import wraps
 import warnings
 from PIL import Image
-from helper_friction import (
-    find_contacting_pieces,
-    check_path_clear_with_friction,
-    get_cost_change_with_friction,
-    move_piece_with_friction,
-)
 
 # Nomenclature and constants from main_trimesh.py
 np.set_printoptions(formatter={'int': '{:2d}'.format})
 NUM_PIECES = 6
+SCALE = 0.02  # meters per grid unit
 TARGET_OFFSETS = np.array([[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0],[0,0,-1]])
-TARGET_OFFSETS = TARGET_OFFSETS * 0.02
 # array([[ 0.  ,  0.  ,  0.02],
 #        [-0.02,  0.  ,  0.  ],
 #        [ 0.02,  0.  ,  0.  ],
@@ -35,14 +29,13 @@ TARGET_OFFSETS = TARGET_OFFSETS * 0.02
 #        [ 0.  , -0.02,  0.  ],
 #        [ 0.  ,  0.  , -0.02]])
 START_OFFSETS = np.array([[4,-8,1],[-8,0,1],[8,0,1],[-4,8,3],[-4,-8,3],[4,8,1]])
-START_OFFSETS = START_OFFSETS * 0.02
 # array([[ 0.08, -0.16,  0.02],
 #        [-0.16,  0.  ,  0.02],
 #        [ 0.16,  0.  ,  0.02],
 #        [-0.08,  0.16,  0.06],
 #        [-0.08, -0.16,  0.06],
 #        [ 0.08,  0.16,  0.02]])
-use_friction = True
+## Friction helpers removed; all planning uses geometry-only checks
 
 # Load MuJoCo model from scene.xml
 model = mujoco.MjModel.from_xml_path('aloha/scene.xml')
@@ -117,14 +110,8 @@ def get_top_k_scored_moves(pieces, active_pids, target_offsets, k=float("inf"), 
         
         this_piece = pieces[pid1]
         
-        # Use friction-aware cost calculation if enabled
-        if use_friction:
-            # Find pieces in contact with the piece to be moved
-            other_pieces = [piece for piece in active_pieces if piece['id'] != pid1]
-            contacting_pieces = find_contacting_pieces(this_piece, other_pieces)
-            cost_change = get_cost_change_with_friction(this_piece, vec, target_offsets[pid1], contacting_pieces)
-        else:
-            cost_change = get_cost_change(this_piece, vec, target_offsets[pid1])
+        # Geometry-only cost calculation (no friction)
+        cost_change = get_cost_change(this_piece, vec, target_offsets[pid1])
         
         # cost_change = get_cost_change(pieces[pid1], vec, target_offsets[pid1])
         cost_change += 0.001 # Constant cost to encourage fewer moves (and break ties)
@@ -139,13 +126,10 @@ def get_top_k_scored_moves(pieces, active_pids, target_offsets, k=float("inf"), 
         
         other_pieces = [piece for piece in active_pieces if piece['id'] != pid1]
         
-        # Use friction-aware path checking if enabled
-        if use_friction:
-            path_clear = check_path_clear_with_friction(this_piece, other_pieces, vec, steps=20)
-        else:
-            test_mesh = this_piece['mesh'].copy()
-            other_meshes = [piece['mesh'] for piece in other_pieces]
-            path_clear = check_path_clear(test_mesh, other_meshes, vec, 20)
+        # Geometry-only path checking (no friction)
+        test_mesh = this_piece['mesh'].copy()
+        other_meshes = [piece['mesh'] for piece in other_pieces]
+        path_clear = check_path_clear(test_mesh, other_meshes, vec, 20)
             
         if path_clear:
             # If removing THIS piece leads to 2+ unsupported pieces, it won't work. 
@@ -201,17 +185,8 @@ def execute_lookahead_recursive(scored_move, pieces, active_pids, target_offsets
     vec = np.array(vec) if isinstance(vec, list) else vec
     target_offsets = np.array(target_offsets) if isinstance(target_offsets, list) else target_offsets
 
-    # Build a virtual assembly according to scored_move
-    # Build a virtual assembly according to scored_move
-    if use_friction:
-        active_pieces_local = [piece for piece in pieces if piece['id'] in active_pids]
-        other_pieces_local = [piece for piece in active_pieces_local if piece['id'] != pid1]
-        contacting_pieces = find_contacting_pieces(pieces[pid1], other_pieces_local)
-        temp_piece, can_move = move_piece_with_friction(copy.deepcopy(pieces[pid1]), vec, contacting_pieces)
-        if not can_move:
-            return ([float('inf')], ((pid1, cid1), (pid2, cid2), vec)), 1
-    else:
-        temp_piece = move_piece(copy.deepcopy(pieces[pid1]), vec)
+    # Build a virtual assembly according to scored_move (geometry-only)
+    temp_piece = move_piece(copy.deepcopy(pieces[pid1]), vec)
     
     temp_pieces = copy.deepcopy(pieces)
     temp_pieces[pid1] = temp_piece
@@ -291,7 +266,7 @@ def update_mujoco_positions(pieces, data):
     for piece in pieces:
         if piece['id'] < NUM_PIECES:  # Only update burr pieces, not floor
             _, qpos_adr, _ = freejoint_addresses(model, piece['id'])
-            centroid = piece['mesh'].bounding_box.centroid
+            centroid = piece['mesh'].bounding_box.centroid * SCALE
             # Set position (first 3 elements of the 7-DOF free joint)
             data.qpos[qpos_adr : qpos_adr + 3] = centroid
             # Set orientation to identity quaternion (next 4 elements: w, x, y, z)
@@ -375,7 +350,7 @@ def run_assembler_mujoco(n_stages=16, top_k=[float("inf")], rollout_depth=0, sta
     if reverse:
         target_offsets = START_OFFSETS
     else:
-        target_offsets = TARGET_OFFSETS + np.array([0,0,3])*0.02
+        target_offsets = TARGET_OFFSETS + np.array([0,0,3])
 
     def print_best_move_info(scored_moves):
         best_costs, ((best_pid, _), (other_pid, _), vec) = scored_moves[0]
@@ -395,8 +370,8 @@ def run_assembler_mujoco(n_stages=16, top_k=[float("inf")], rollout_depth=0, sta
     if latest_step is None:
         floor = create_floor(reverse=reverse)
         if reverse:
-            # TARGET_OFFSETS already in meters (scaled by 0.02); add 3 grid units as 0.06 m
-            pieces = define_all_burr_pieces(TARGET_OFFSETS + np.array([0,0,3]) * 0.02)
+            # Reverse mode: assembled target lifted by +3 grid units
+            pieces = define_all_burr_pieces(TARGET_OFFSETS + np.array([0,0,3]))
             active_pids = [i for i in range(NUM_PIECES)] + [FLOOR_INDEX_OFFSET]
         else:
             pieces = define_all_burr_pieces(START_OFFSETS)
@@ -476,8 +451,9 @@ def run_assembler_mujoco(n_stages=16, top_k=[float("inf")], rollout_depth=0, sta
         
         # Simulate the move in MuJoCo environment
         current_pos = pieces[best_pid]['mesh'].bounding_box.centroid
-        target_pos = current_pos + best_vec
-        final_pos = simulate_move_in_mujoco(best_pid, target_pos, data, model)
+        target_pos_m = (current_pos + best_vec) * SCALE
+        final_pos_m = simulate_move_in_mujoco(best_pid, target_pos_m, data, model)
+        final_pos = final_pos_m / SCALE
         
         # Update Trimesh piece with MuJoCo's final position (apply_translation is in-place)
         pieces[best_pid]['mesh'].apply_translation(final_pos - current_pos)
@@ -495,22 +471,42 @@ def run_assembler_mujoco(n_stages=16, top_k=[float("inf")], rollout_depth=0, sta
 # Include other functions from main_trimesh.py as needed (get_top_k_scored_moves, etc.)
 # ... (copy the relevant functions here)
 
+def show_final_assembly_mujoco(reverse=True):
+    """
+    Place pieces directly into their final assembled configuration in MuJoCo and display.
+    - reverse=True: shows target assembly lifted by +3 grid units (to float above floor)
+    - reverse=False: shows base target assembly position (with +3 applied to target_offsets in run)
+    """
+    # Build pieces in their target configuration (grid units)
+    if reverse:
+        target_offsets = TARGET_OFFSETS + np.array([0, 0, 3])
+    else:
+        target_offsets = TARGET_OFFSETS + np.array([0, 0, 3])
+
+    pieces = define_all_burr_pieces(target_offsets)
+    floor = create_floor(reverse=reverse)
+    pieces_augmented = pieces + [floor]
+
+    # Sync MuJoCo with these positions (convert to meters inside updater)
+    update_mujoco_positions(pieces, data)
+    mujoco.mj_forward(model, data)
+
+    # Launch passive viewer to display final assembly
+    viewer = mujoco.viewer.launch_passive(model, data)
+    try:
+        # Keep the viewer open until the window is closed
+        while viewer.is_running():
+            viewer.sync()
+            time.sleep(0.01)
+    except Exception:
+        pass
+
 if __name__ == "__main__":
     reverse = True
+    # Run planner and move pieces step-by-step (friction removed)
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     folder = f"results/{timestamp}"
     folder_sim = f"{folder}/states"
-    folder_img = f"{folder}/frames"
     start_time = time.time()
     run_assembler_mujoco(n_stages=1, top_k=[100, 10], rollout_depth=1, folder=folder_sim, reverse=reverse)
-    
-    # Remove frame saving and GIF compilation
-    # show_and_save_frames_mujoco(folder_sim, folder_img, hold=False, reverse=reverse, steps=20)
-    # compile_gif(folder=folder_img, reverse=False)
-    # compile_gif(folder=folder_img, reverse=True)
-    
-    # Launch MuJoCo viewer to visualize the final assembled state
-    print("Launching MuJoCo viewer for live visualization...")
-    # mujoco.viewer.launch(model, data)  # This will open an interactive window showing the scene
-    
     print(f"This script took {time.time() - start_time:.4f} seconds to run.")
