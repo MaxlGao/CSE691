@@ -338,6 +338,199 @@ def simulate_move_in_mujoco(piece_id, target_position, data, model, steps=50, dt
     # Return the final position
     return data.qpos[qpos_adr : qpos_adr + 3]
 
+############################
+# Robot arm following (IK) #
+############################
+
+def _arm_joint_names(arm="left"):
+    if arm == "left":
+        return [
+            "left/waist",
+            "left/shoulder",
+            "left/elbow",
+            "left/forearm_roll",
+            "left/wrist_angle",
+            "left/wrist_rotate",
+        ]
+    else:
+        return [
+            "right/waist",
+            "right/shoulder",
+            "right/elbow",
+            "right/forearm_roll",
+            "right/wrist_angle",
+            "right/wrist_rotate",
+        ]
+
+def _arm_site_name(arm="left"):
+    return f"{arm}/gripper"
+
+def _get_joint_ids_addrs(model, joint_names):
+    jids = []
+    qpos_addrs = []
+    dof_addrs = []
+    for jn in joint_names:
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jn)
+        jids.append(jid)
+        qpos_addrs.append(model.jnt_qposadr[jid])
+        dof_addrs.append(model.jnt_dofadr[jid])
+    return jids, qpos_addrs, dof_addrs
+
+def _clamp_to_range(model, jid, qval):
+    # Clamp joint position to its range if specified
+    rng = model.jnt_range[jid]
+    lo, hi = rng[0], rng[1]
+    if lo == hi == 0.0:
+        # Some joints may have 0 0 to indicate no explicit range; skip clamp
+        return qval
+    return float(np.clip(qval, lo, hi))
+
+def ik_step_to_site(model, data, site_name, target_pos, joint_names, step_size=0.5, damping=1e-4):
+    """
+    One damped-least-squares IK step for site position only.
+    joint_names: list of joint names to use in the chain
+    """
+    # Get site id and current pos
+    sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
+    mujoco.mj_forward(model, data)
+    current_pos = np.array(data.site_xpos[sid])
+    err = target_pos - current_pos
+    if np.linalg.norm(err) < 1e-4:
+        return True
+
+    # Jacobian for site
+    nv = model.nv
+    jacp = np.zeros((3, nv))
+    jacr = np.zeros((3, nv))
+    mujoco.mj_jacSite(model, data, jacp, jacr, sid)
+
+    # Select columns corresponding to chosen joints' DOFs
+    joint_ids, qpos_addrs, dof_addrs = _get_joint_ids_addrs(model, joint_names)
+    idxs = [model.jnt_dofadr[jid] for jid in joint_ids]  # hinge/slide -> one dof each
+    J = jacp[:, idxs]  # 3 x n_joints
+
+    # Damped least squares: dq = J^T (J J^T + λ I)^-1 * err
+    # Add small gain via step_size
+    A = J @ J.T + damping * np.eye(3)
+    dq = J.T @ np.linalg.solve(A, err * step_size)
+
+    # Apply dq to joint qpos
+    for k, jid in enumerate(joint_ids):
+        qadr = model.jnt_qposadr[jid]
+        new_q = data.qpos[qadr] + dq[k]
+        data.qpos[qadr] = _clamp_to_range(model, jid, new_q)
+
+    mujoco.mj_forward(model, data)
+    return np.linalg.norm(err) < 1e-3
+
+def simulate_move_with_arm(piece_id, target_position_m, data, model, arm="left", steps=80, dt=0.01):
+    """
+    Move a piece to target_position_m while guiding a robot arm's gripper along the same path.
+    The piece is moved via its free joint (as before). The arm follows via simple positional IK.
+    """
+    # Piece motion setup
+    _, qpos_adr, qvel_adr = freejoint_addresses(model, piece_id)
+    current_pos = data.qpos[qpos_adr : qpos_adr + 3].copy()
+    velocity = (target_position_m - current_pos) / (steps * dt)
+
+    # Arm/gripper setup
+    site_name = _arm_site_name(arm)
+    sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
+    mujoco.mj_forward(model, data)
+    start_site = np.array(data.site_xpos[sid])
+
+    # Follow a path: keep a small offset above the piece center
+    offset = np.array([0.0, 0.0, 0.05])
+    start_target = (current_pos + offset)
+    end_target = (target_position_m + offset)
+
+    # Choose joint chain for IK
+    joint_names = _arm_joint_names(arm)
+
+    for s in range(steps):
+        alpha = (s + 1) / steps
+        # piece target this step handled via velocity
+        data.qvel[qvel_adr : qvel_adr + 3] = velocity
+        data.qvel[qvel_adr + 3 : qvel_adr + 6] = [0.0, 0.0, 0.0]
+
+        # target for gripper follows linear path
+        target = (1 - alpha) * start_target + alpha * end_target
+        # small IK step towards target
+        ik_step_to_site(model, data, site_name, target, joint_names, step_size=0.5, damping=1e-3)
+
+        # Step physics
+        mujoco.mj_step(model, data)
+        time.sleep(dt)
+
+    # Stop the piece
+    data.qvel[qvel_adr : qvel_adr + 6] = 0
+    mujoco.mj_forward(model, data)
+    return data.qpos[qpos_adr : qpos_adr + 3]
+
+def simulate_move_with_two_arms(piece_id, mate_id, target_position_m, data, model, primary_arm="left", steps=80, dt=0.01, viewer=None):
+    """
+    Coordinate both arms: primary arm follows the moving piece, secondary arm hovers near the mate piece
+    to mimic stabilization/coordination seen in main_trimesh. This is a positional IK heuristic.
+    """
+    # Primary piece freejoint motion (drive position kinematically for clear visualization)
+    _, qpos_adr, qvel_adr = freejoint_addresses(model, piece_id)
+    current_pos = data.qpos[qpos_adr : qpos_adr + 3].copy()
+
+    # Get mate piece world pos (for hovering target of secondary arm)
+    _, mate_qpos_adr, _ = freejoint_addresses(model, mate_id)
+    mate_pos = data.qpos[mate_qpos_adr : mate_qpos_adr + 3].copy()
+
+    # Arms
+    primary = primary_arm
+    secondary = "right" if primary == "left" else "left"
+    primary_site = _arm_site_name(primary)
+    secondary_site = _arm_site_name(secondary)
+    primary_chain = _arm_joint_names(primary)
+    secondary_chain = _arm_joint_names(secondary)
+
+    # Targets
+    lift = np.array([0.0, 0.0, 0.05])
+    start_target_primary = current_pos + lift
+    end_target_primary = target_position_m + lift
+    # Secondary arm hovers near mate, slightly offset from the motion direction
+    hover_side = np.array([0.03, 0.0, 0.05])
+    if np.linalg.norm(target_position_m - current_pos) > 1e-6:
+        motion_dir = (target_position_m - current_pos) / np.linalg.norm(target_position_m - current_pos)
+        side = np.array([motion_dir[1], -motion_dir[0], 0.0])  # perpendicular in XY
+        hover_side = 0.04 * side + np.array([0, 0, 0.05])
+    hover_target_secondary = mate_pos + hover_side
+
+    for s in range(steps):
+        alpha = (s + 1) / steps
+        # Move piece kinematically along linear path
+        new_pos = (1 - alpha) * current_pos + alpha * target_position_m
+        data.qpos[qpos_adr : qpos_adr + 3] = new_pos
+        data.qvel[qvel_adr : qvel_adr + 6] = 0
+        mujoco.mj_forward(model, data)
+
+        # Primary follows path over the piece
+        target_primary = (1 - alpha) * start_target_primary + alpha * end_target_primary
+        ik_step_to_site(model, data, primary_site, target_primary, primary_chain, step_size=0.5, damping=1e-3)
+
+        # Secondary stabilizes near the mate
+        ik_step_to_site(model, data, secondary_site, hover_target_secondary, secondary_chain, step_size=0.4, damping=1e-3)
+
+        # Sync viewer so motion is visible
+        if viewer is not None:
+            viewer.sync()
+        time.sleep(dt)
+
+    # Stop the piece
+    data.qvel[qvel_adr : qvel_adr + 6] = 0
+    mujoco.mj_forward(model, data)
+    return data.qpos[qpos_adr : qpos_adr + 3]
+
+def choose_primary_arm(vec_grid):
+    """Pick left or right arm based on motion direction (x-axis) and robot base positions.
+    If moving toward +x, use right arm; toward -x, use left arm.
+    """
+    return "right" if vec_grid[0] >= 0 else "left"
+
 # Modified run_assembler to integrate with MuJoCo
 def run_assembler_mujoco(n_stages=16, top_k=[float("inf")], rollout_depth=0, start_from=None, folder='results', reverse=False):
     # Removed unused use_friction parameter
@@ -362,7 +555,7 @@ def run_assembler_mujoco(n_stages=16, top_k=[float("inf")], rollout_depth=0, sta
         x, y, z = vec
         print(f"| Score [{scores}]")
         print(f"| → Best move: Piece {best_pid} → {other_pid}, vec = <{x: .0f},{y: .0f},{z: .0f}>.")
-        return best_pid, vec
+        return best_pid, other_pid, vec
 
     # Launch viewer at the start for live visualization
     viewer = mujoco.viewer.launch_passive(model, data)
@@ -446,13 +639,15 @@ def run_assembler_mujoco(n_stages=16, top_k=[float("inf")], rollout_depth=0, sta
             print(f"No valid moves found at stage {stage}. Assembly might be complete or stuck.")
             save_simulation_state(stage, pieces_augmented, active_pids, [], folder=folder)
             return
-        best_pid, best_vec = print_best_move_info(scored_moves)
+        best_pid, other_pid, best_vec = print_best_move_info(scored_moves)
         save_simulation_state(stage, pieces_augmented, active_pids, scored_moves, folder=folder)
-        
+
         # Simulate the move in MuJoCo environment
         current_pos = pieces[best_pid]['mesh'].bounding_box.centroid
         target_pos_m = (current_pos + best_vec) * SCALE
-        final_pos_m = simulate_move_in_mujoco(best_pid, target_pos_m, data, model)
+        # Move piece and guide both arms: primary follows moving piece, secondary stabilizes by mate
+        primary_arm = choose_primary_arm(best_vec)
+        final_pos_m = simulate_move_with_two_arms(best_pid, other_pid, target_pos_m, data, model, primary_arm=primary_arm, steps=80, dt=0.01, viewer=viewer)
         final_pos = final_pos_m / SCALE
         
         # Update Trimesh piece with MuJoCo's final position (apply_translation is in-place)
